@@ -43,7 +43,7 @@ flowchart LR
 
 | 步骤 | 提示词文件 / 函数 | `callAi` | 输入要点 |
 |------|-------------------|----------|----------|
-| **0. 智能 URL 探索** | `prompts/file2flow/00-smart-url-exploration.md` + `smartExploreUrlsInSourceText()` | 是（仅当 sourceText 中含 URL 才调；可跳过） | 扫 sourceText 抓 http(s) URL（上限 8 个候选）→ LLM 决定哪些值得 follow（上限 3 个）→ 服务端 fetch 每个并 append；**只走一轮**，不递归。失败开（fail-open）：任何错误返回原 sourceText |
+| **0. 智能 URL 探索** | `prompts/file2flow/00-smart-url-exploration.md` + `smartExploreUrlsInSourceText()` | 是（仅当 sourceText 中含 URL 才调；可跳过） | 扫 sourceText 抓 http(s) URL（上限 12 个候选）→ LLM 决定哪些值得 follow（上限 6 个）→ 服务端 fetch 每个并 append；**只走一轮**，不递归。失败开（fail-open）：任何错误返回原 sourceText |
 | 1. 转述 | `prompts/file2flow/01-source-restatement.md` | 是（可跳过） | 固定英文指令 + `---` + 步骤 0 增强后的 `sourceText` |
 | 1b. 标题 | `prompts/file2flow/01b-flow-title-from-restatement.md` | 是（可跳过） | 转述全文 + 前端草稿 `name` / `sourceFile` → **简洁名**（含文书类型）；写入 `pipelineInput.name` 并覆盖最终 `flowName` 与 DEFINITION 节点 `label` |
 | 2. 预处理 | `prompts/file2flow/02-source-preprocess.md` | 是（可跳过） | **转述后**全文 `{{SOURCE_TEXT}}` → `candidatePoints`、分支 dossier 等 |
@@ -116,17 +116,17 @@ sourceText = desc + fileText + ("--- Content from <url1> ---\n\n" + urlText1) + 
 **目的**：用户的源文档常常说「步骤详见 `https://...`」，但那个 URL 的内容并没有被前端 fetch（如果用户没在 URL 输入框里填它）。这一步让流水线**自动**判断要不要去 follow 这些"内嵌"URL，把内容拉进来。
 
 **算法**：
-1. 用 regex 扫 `sourceText`，提取所有 `https?://` URL，去重，截断到 **8 个**候选。
+1. 用 regex 扫 `sourceText`，提取所有 `https?://` URL，去重，截断到 **12 个**候选。
 2. 没找到任何 URL → 跳过，直接返回原文本。
 3. 调一次 LLM（`00-smart-url-exploration.md`），输入：
    - `{{SOURCE_TEXT_PREVIEW}}`：前 8K 字的源文本（让 LLM 看到每个 URL 的上下文）
    - `{{CANDIDATE_URLS_JSON}}`：候选 URL JSON 数组
-4. LLM 输出 `{ follow: [], skip: [], reasoning: "" }`。服务端只信 `follow` 里**严格匹配**候选列表的 URL，再截到 **3 个**。
+4. LLM 输出 `{ follow: [], skip: [], reasoning: "" }`。服务端只信 `follow` 里**严格匹配**候选列表的 URL，再截到 **6 个**。
 5. 对每个 follow URL 调 `fetchUrlAsText`（同 `/api/extract-url-text`，含链接保留），失败的 URL 静默记录到 `fetchErrors`。
 6. 把抓回的内容用 `--- Followed link <url> ---\n\n<text>` 头部分段拼到原 sourceText 末尾。
 7. **只走一轮**：抓回来的新内容不再被扫一遍 URL。
 
-**常量**：`FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES` (8), `FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW` (3), `FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS` (8000)。
+**常量**：`FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES` (12), `FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW` (6), `FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS` (8000)。
 
 **失败开（fail-open）**：LLM 调用失败、JSON 解析失败、URL fetch 失败、网络超时 —— **任何**异常都返回原 sourceText 不阻塞主流程，错误细节落 `step0_smartUrlExploration` 调试字段。
 
@@ -196,6 +196,15 @@ sourceText = desc + fileText + ("--- Content from <url1> ---\n\n" + urlText1) + 
   - 缺 **ACTION** → 合成占位 `Action — to be defined`，优先接到某个 DECISION 中尚无 outgoing 的 answer 端口；都没有则直接挂在 DEFINITION 下。
   - 合成事件写入 `console.warn` 与 `step4_normalizedGraph.synthesizedNodeTypes`；UI 不报错，admin 进画布后可手动修正。
 
+### 3.6a 结构约束（`enforceGraphStructuralConstraints`，步骤 4 末尾 + 步骤 5 入口）
+
+在归一化后、重排前强制执行：
+
+- **仅一个 DEFINITION** 节点（多余的会删除并尽量把出边接到保留节点）。
+- **每个出口最多一条边**：按 `(sourceNodeId, sourceAnswerId)` 去重，保证每个 DECISION 选项只有一条出边；DEFINITION / ACTION 的 `sourceAnswerTempId: null` 出口同样最多一条。
+
+可避免 AI / scaffold 产生的平行重复边，否则步骤 5 的 DFS 会把同一条逻辑路径数出很多遍。
+
 ### 3.6b 步骤 5 — 微调顺序（`restructureDecisionsBeforeActions`）
 
 研究员端的体验是「先答完所有问题，再看到所有 action / contact」。这一步把图强制改成：
@@ -209,11 +218,13 @@ DEFINITION → DECISION* → (ACTION | PEOPLE)*
 **算法**（纯本地，无 LLM）：
 
 1. **检测违规**：DFS from DEFINITION，标记任何 `(ACTION ancestor) → DECISION` 的边。无违规直接返回原图（pass-through）。
-2. **枚举路径**：DFS 列出所有 DEFINITION → leaf 的简单路径，每步记录 `(nodeId, portToNext)`（decision 的 port = answer id）。
+2. **枚举路径**：DFS 列出 DEFINITION → leaf 的简单路径；**按遍历签名去重**，避免重复边导致的同一路径多次计数。
 3. **重写每条路径**：把路径拆成 `decisions[]`（保原顺序）+ `actions[]`（保原顺序），重组为 `def → decisions → actions`。
 4. **节点处理**：
    - **DECISION 共享**：每个 decision 在最终图里只出现一次（按 id 去重）；
-   - **ACTION / PEOPLE 克隆**：每条路径自带一份独立 clone（id 加 `__pX_Y` 后缀）。这样保证不同终端答案分别对应一条独立的 action 链，研究员遍历时不会跨答案混淆。
+   - **ACTION / PEOPLE 克隆**：仅当步骤 1 仍检测到 `ACTION→DECISION` 违规时运行；**相同 action 序列只克隆一份**（id 后缀 `__pN_i`）。若画布上出现大量 `__p0_0`、`__p1_0`… 同名链，即此步骤曾对过多「伪路径」逐条克隆——优先检查步骤 4 后是否有多余平行边。
+
+**冗余根因（常见）**：步骤 3/4 构图或 merge 后，同一 DECISION 选项或同一 ACTION 挂了多条出边 → 步骤 5 认为有十几条「不同路径」，把同一条 OSP/SAGE 链克隆十几次。约束去重 + 路径去重后，通常只剩 2–4 条真实分支。
 5. **边去重**：按 `(source, sourceAnswerId, target)` 去重；decision 间的边共享，clone 之间的边天然唯一。
 6. **孤立节点**：原图里不可达的节点原样保留。
 
@@ -241,7 +252,7 @@ DEFINITION → DECISION* → (ACTION | PEOPLE)*
 | `step3_*` | 构图 prompt / 原始输出 / 解析 / 修复日志 |
 | **`step0_smartUrlExploration`** | 智能 URL 探索 bundle：`skipped` / `reason` / `candidates[]` / `llmDecision { follow, skip, reasoning }` / `parseError` / `followed[]` / `fetchErrors[{url,error}]` / `appendedChars` / `augmentedSourceText` |
 | `step4_normalizedGraph` | 归一化后的图；含 `synthesizedNodeTypes: []`（被自动补出的节点类型，如 `["DEFINITION"]`） |
-| **`step5_restructure`** | 微调顺序步骤：`changed` / `violations[]` / `pathCount` / `cloneCount` / `graphAfter`（仅 changed 时含图） |
+| **`step5_restructure`** | 微调顺序：`changed` / `violations[]` / `pathCount` / `cloneCount` / `pathsDeduped` / `constraintNotes` / `graphAfter` |
 
 ### 3.8 环境变量
 

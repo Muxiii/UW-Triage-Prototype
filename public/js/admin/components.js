@@ -588,7 +588,7 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     if (!graph) return;
     const nextNodes = ensureDefinitionNode(graph.nodes || []);
     setNodes(nextNodes);
-    setEdges(graph.edges || []);
+    setEdges(sanitizeBuilderEdges(nextNodes, graph.edges || []));
     setSelected(null);
     setHistory({ past: [], future: [] });
     setPan(panForDefinition(nextNodes));
@@ -837,8 +837,9 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
   const startConn = (e, node, portId) => {
     if (readOnly) return;
     e.stopPropagation();
-    const p = getDomPortPos(node, portId);
-    setPendingConn({ fromNode: node.id, fromPort: portId, cursor: p });
+    const resolved = resolveBuilderFromPort(node, portId);
+    const p = getDomPortPos(node, resolved);
+    setPendingConn({ fromNode: node.id, fromPort: resolved, cursor: p });
     wrapRef.current.classList.add('connecting');
   };
 
@@ -846,11 +847,34 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     e.stopPropagation();
     if (!pendingConn) return;
     if (pendingConn.fromNode === toNode.id) { setPendingConn(null); wrapRef.current.classList.remove('connecting'); return; }
+    const fromNode = nodes.find((n) => n.id === pendingConn.fromNode);
+    if (!fromNode) return;
+    let fromPort = pendingConn.fromPort;
+    if (fromNode.type === 'decision') {
+      if (!fromNode.answers?.some((a) => a.id === fromPort)) {
+        setPendingConn(null);
+        wrapRef.current.classList.remove('connecting');
+        toast('Connect from a branch port on the decision node');
+        return;
+      }
+    } else if (isSingleOutletBuilderNode(fromNode)) {
+      fromPort = 'out';
+      if (edges.some((ed) => ed.from === fromNode.id)) {
+        setPendingConn(null);
+        wrapRef.current.classList.remove('connecting');
+        toast('Action nodes can have only one outgoing connection');
+        return;
+      }
+    } else {
+      fromPort = 'out';
+    }
     snapshot();
-    setEdges(es => {
-      const filtered = es.filter(e => !(e.from === pendingConn.fromNode && e.fromPort === pendingConn.fromPort));
-      return [...filtered, { id: 'e' + Date.now(), from: pendingConn.fromNode, fromPort: pendingConn.fromPort, to: toNode.id, toPort: toPortId }];
-    });
+    setEdges((es) =>
+      sanitizeBuilderEdges(nodes, [
+        ...es.filter((ed) => !(ed.from === fromNode.id && ed.fromPort === fromPort)),
+        { id: 'e' + Date.now(), from: fromNode.id, fromPort, to: toNode.id, toPort: toPortId || 'in' },
+      ])
+    );
     setPendingConn(null);
     wrapRef.current.classList.remove('connecting');
     toast('Connection created');
@@ -939,12 +963,15 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
   const edgeEls = edges.map(e => {
     const a = nodeMap[e.from], b = nodeMap[e.to];
     if (!a || !b) return null;
-    const p1 = getDomPortPos(a, e.fromPort), p2 = getDomPortPos(b, e.toPort);
+    const fromPort = resolveBuilderFromPort(a, e.fromPort);
+    if (a.type === 'decision' && !a.answers?.some((ans) => ans.id === fromPort)) return null;
+    const p1 = getDomPortPos(a, fromPort);
+    const p2 = getDomPortPos(b, e.toPort || 'in');
     const d = bezier(p1, p2);
     const isSel = selected?.type === 'edge' && selected.id === e.id;
     let label = '';
-    if (a.type === 'decision' && e.fromPort !== 'out') {
-      const idx = a.answers?.findIndex(ans => ans.id === e.fromPort);
+    if (a.type === 'decision') {
+      const idx = a.answers?.findIndex((ans) => ans.id === fromPort);
       if (idx >= 0) label = String(idx + 1);
     }
     const midX = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2;
@@ -975,7 +1002,7 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
           {pendingConn && (() => {
             const fn = nodeMap[pendingConn.fromNode];
             if (!fn) return null;
-            const p1 = getDomPortPos(fn, pendingConn.fromPort);
+            const p1 = getDomPortPos(fn, resolveBuilderFromPort(fn, pendingConn.fromPort));
             return <path className="edge-preview" d={bezier(p1, pendingConn.cursor)} />;
           })()}
         </svg>
@@ -2015,9 +2042,10 @@ function MiniFlowPreview({ nodes, edges, small = false }) {
   );
 }
 
-/** Pipeline step ids mirror the server's `emit(...)` calls in generateGraph
-    + the route-level validate event. Keep these in sync with server.mjs. */
+/** Pipeline steps: client prep (browser) + server `emit(...)` in generateGraph + validate. */
 const FILE2FLOW_AI_PIPELINE_STEPS = [
+  { id: 'prep_detect', label: 'Detect input sources', clientOnly: true },
+  { id: 'prep_extract', label: 'Extract document and URL text', clientOnly: true },
   { id: 'smart_explore', label: 'Smart URL exploration' },
   { id: 'restate', label: 'Restate signing workflow' },
   { id: 'nodes', label: 'Extract node candidates' },
@@ -2025,7 +2053,109 @@ const FILE2FLOW_AI_PIPELINE_STEPS = [
   { id: 'graph', label: 'Build workflow graph' },
   { id: 'reorder', label: 'Reorder decisions before actions' },
   { id: 'validate', label: 'Validate workflow structure' },
+  { id: 'prep_apply', label: 'Apply workflow to canvas', clientOnly: true },
 ];
+
+function formatStepDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return '<1s';
+  const s = ms / 1000;
+  if (s < 60) return `${Math.floor(s)} s`;
+  const m = Math.floor(s / 60);
+  const rem = Math.round(s % 60);
+  return rem ? `${m} m ${rem} s` : `${m} m`;
+}
+
+function formatStepDetail(stepId, meta) {
+  if (!meta || typeof meta !== 'object') return '';
+  if (stepId === 'prep_detect') {
+    const parts = [];
+    if (meta.hasFile) parts.push('document');
+    if (meta.urlCount > 0) parts.push(`${meta.urlCount} URL(s)`);
+    if (meta.hasDesc) parts.push('description');
+    return parts.length ? parts.join(' · ') : 'text only';
+  }
+  if (stepId === 'prep_extract') {
+    const parts = [];
+    if (meta.chars != null) parts.push(`${meta.chars} chars`);
+    if (meta.hasFile) parts.push('file');
+    if (meta.urlCount > 0) parts.push(`${meta.urlCount} URL(s)`);
+    return parts.join(' · ');
+  }
+  if (stepId === 'prep_apply' && meta.debugPath) return meta.debugPath;
+  if (stepId === 'smart_explore') {
+    if (meta.reason) return String(meta.reason);
+    const parts = [];
+    if (meta.followed != null && meta.candidates != null) {
+      parts.push(`${meta.followed} of ${meta.candidates} URL(s) followed`);
+    }
+    if (meta.appendedChars > 0) parts.push(`${meta.appendedChars} chars appended`);
+    return parts.join(' · ');
+  }
+  if (stepId === 'restate' && meta.chars != null) return `${meta.chars} chars`;
+  if (stepId === 'nodes' && meta.candidatePoints != null) return `${meta.candidatePoints} candidate points`;
+  if (stepId === 'complete' && meta.candidatePoints != null) return `${meta.candidatePoints} points linked`;
+  if (stepId === 'graph') {
+    const parts = [];
+    if (meta.nodes != null) parts.push(`${meta.nodes} nodes`);
+    if (meta.edges != null) parts.push(`${meta.edges} edges`);
+    return parts.join(' · ');
+  }
+  if (stepId === 'reorder') {
+    if (meta.reason) return String(meta.reason);
+    if (meta.changed) {
+      const parts = [];
+      if (meta.pathCount != null) parts.push(`${meta.pathCount} path(s)`);
+      if (meta.cloneCount != null) parts.push(`${meta.cloneCount} clone(s)`);
+      return parts.join(' · ') || 'reordered';
+    }
+    return 'no reorder needed';
+  }
+  if (stepId === 'validate') {
+    const e = meta.errors ?? 0;
+    const w = meta.warnings ?? 0;
+    return e || w ? `${e} error(s), ${w} warning(s)` : 'ok';
+  }
+  if (meta.reason) return String(meta.reason);
+  if (meta.error) return String(meta.error);
+  return '';
+}
+
+function renderStepMeta(stepId, status, meta, times, nowMs) {
+  const timing = times[stepId];
+  const elapsed =
+    status === 'active' && timing?.startedAt
+      ? nowMs - timing.startedAt
+      : timing?.startedAt && timing?.endedAt
+        ? timing.endedAt - timing.startedAt
+        : null;
+  const dur = elapsed != null ? formatStepDuration(elapsed) : '';
+  const detail = formatStepDetail(stepId, meta);
+
+  if (status === 'active') {
+    return (
+      <span className="nf-ai-step-meta">
+        In progress{dur ? ` · ${dur}` : ''}
+      </span>
+    );
+  }
+  if (status === 'done') {
+    const parts = ['Completed'];
+    if (detail) parts.push(detail);
+    if (dur) parts.push(dur);
+    return <span className="nf-ai-step-meta nf-ai-step-meta--done">{parts.join(' · ')}</span>;
+  }
+  if (status === 'skipped') {
+    const parts = ['Skipped'];
+    if (detail) parts.push(detail);
+    if (dur) parts.push(dur);
+    return <span className="nf-ai-step-meta nf-ai-step-meta--done">{parts.join(' · ')}</span>;
+  }
+  if (status === 'pending') {
+    return <span className="nf-ai-step-meta nf-ai-step-meta--wait">Queued</span>;
+  }
+  return null;
+}
 
 function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
   const [urls, setUrls] = useState(['']);
@@ -2036,17 +2166,51 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
   const [analysisError, setAnalysisError] = useState('');
   /** -1 = prep only; 0..N-1 = pipeline step index of the currently active step */
   const [aiPipelineIndex, setAiPipelineIndex] = useState(-1);
-  /** Per-step status: { [step.id]: 'active' | 'done' | 'skipped' }. Authoritative
-      for icon / label rendering; aiPipelineIndex only drives the progress bar fill. */
+  /** Per-step status: { [step.id]: 'active' | 'done' | 'skipped' }. */
   const [aiStepStates, setAiStepStates] = useState({});
+  const [aiStepMeta, setAiStepMeta] = useState({});
+  const [aiStepTimes, setAiStepTimes] = useState({});
+  const [aiTick, setAiTick] = useState(0);
   const [aiPrepMessage, setAiPrepMessage] = useState('');
   const fileRef = React.useRef(null);
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  const setPrepStep = (msg) => {
+  const pipelineIndex = (stepId) => FILE2FLOW_AI_PIPELINE_STEPS.findIndex((s) => s.id === stepId);
+
+  const patchStep = React.useCallback((stepId, status, meta) => {
+    const idx = pipelineIndex(stepId);
+    const ts = Date.now();
+    setAiStepStates((prev) => ({ ...prev, [stepId]: status }));
+    if (meta !== undefined) setAiStepMeta((prev) => ({ ...prev, [stepId]: meta }));
+    setAiStepTimes((prev) => {
+      const cur = prev[stepId] || {};
+      if (status === 'active') {
+        return { ...prev, [stepId]: { startedAt: ts, endedAt: null } };
+      }
+      if (status === 'done' || status === 'skipped') {
+        return { ...prev, [stepId]: { startedAt: cur.startedAt ?? ts, endedAt: ts } };
+      }
+      return prev;
+    });
+    if (status === 'active') {
+      setAiPrepMessage('');
+      if (idx >= 0) setAiPipelineIndex(idx);
+    } else if ((status === 'done' || status === 'skipped') && idx >= 0) {
+      setAiPipelineIndex((curr) => Math.max(curr, idx + 1));
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!analyzing) return undefined;
+    const hasActive = Object.values(aiStepStates).some((s) => s === 'active');
+    if (!hasActive) return undefined;
+    const id = setInterval(() => setAiTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [analyzing, aiStepStates]);
+
+  const setPrepBanner = (msg) => {
     setAiPrepMessage(msg);
-    setAiPipelineIndex(-1);
   };
 
   if (!open) return null;
@@ -2068,25 +2232,24 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
     setAnalyzing(true);
     setAnalysisError('');
     setAiPrepMessage('');
-    setAiPipelineIndex(-1);
+    setAiPipelineIndex(0);
     setAiStepStates({});
+    setAiStepMeta({});
+    setAiStepTimes({});
     try {
-      setPrepStep('Detecting file type and input source…');
+      patchStep('prep_detect', 'active');
       await sleep(PREP_MS);
+      patchStep('prep_detect', 'done', {
+        hasFile: Boolean(file),
+        urlCount: urls.filter((u) => String(u || '').trim()).length,
+        hasDesc: Boolean(String(desc || '').trim()),
+      });
 
       const filledUrls = urls.filter((u) => String(u || '').trim());
       const urlCount = filledUrls.length;
-      if (file && urlCount > 0) {
-        setPrepStep(`Extracting text from document and ${urlCount} URL${urlCount > 1 ? 's' : ''}…`);
-      } else if (file) {
-        setPrepStep('Extracting text from document…');
-      } else if (urlCount > 0) {
-        setPrepStep(`Fetching text from ${urlCount} URL${urlCount > 1 ? 's' : ''}…`);
-      } else {
-        setPrepStep('Preparing materials (description, body text)…');
-      }
-
+      patchStep('prep_extract', 'active');
       const sourceText = await buildFile2flowSourceText({ desc, file, urls });
+      patchStep('prep_extract', 'done', { chars: sourceText.length, hasFile: Boolean(file), urlCount });
       if (!sourceText) {
         throw new Error('Please upload a file, add a URL, add a description, or paste policy text (at least one).');
       }
@@ -2114,20 +2277,15 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
         throw new Error(errBody.error || `AI analysis failed (HTTP ${res.status})`);
       }
 
-      const idIndex = (stepId) => FILE2FLOW_AI_PIPELINE_STEPS.findIndex((s) => s.id === stepId);
       let finalResult = null;
       let streamedError = null;
       const handleEvent = (evt) => {
         if (evt?.type === 'step') {
-          const idx = idIndex(evt.id);
-          if (idx < 0) return;
+          if (pipelineIndex(evt.id) < 0) return;
           if (evt.status === 'start') {
-            setAiPrepMessage('');
-            setAiPipelineIndex(idx);
-            setAiStepStates((prev) => ({ ...prev, [evt.id]: 'active' }));
+            patchStep(evt.id, 'active');
           } else if (evt.status === 'done' || evt.status === 'skipped') {
-            setAiStepStates((prev) => ({ ...prev, [evt.id]: evt.status }));
-            setAiPipelineIndex((curr) => Math.max(curr, idx + 1));
+            patchStep(evt.id, evt.status, evt.meta ?? null);
           }
         } else if (evt?.type === 'result') {
           finalResult = evt;
@@ -2180,21 +2338,24 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
         throw new Error('AI analysis finished but no flow was returned. (If you recently updated the server, restart `npm run dev` so the new streaming endpoint is loaded.)');
       }
 
-      setAiPipelineIndex(FILE2FLOW_AI_PIPELINE_STEPS.length);
-      setPrepStep('Applying workflow to canvas…');
+      setAiPipelineIndex(FILE2FLOW_AI_PIPELINE_STEPS.length - 1);
+      patchStep('prep_apply', 'active');
       await sleep(300);
-
+      const applyMeta = {};
       if (finalResult.file2flowDebugPath) {
-        setPrepStep(`Debug snapshot written: ${finalResult.file2flowDebugPath}`);
+        applyMeta.debugPath = finalResult.file2flowDebugPath;
         await sleep(900);
       }
+      patchStep('prep_apply', 'done', applyMeta);
+
+      setAiPipelineIndex(FILE2FLOW_AI_PIPELINE_STEPS.length);
 
       onGenerated?.(finalResult.flow);
       onClose();
     } catch (error) {
       const message = error.message || 'AI analysis failed';
       setAnalysisError(message);
-      setPrepStep('');
+      setAiPrepMessage('');
       setAiPipelineIndex(-1);
     } finally {
       setAnalyzing(false);
@@ -2318,19 +2479,19 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
                 />
               </div>
               <ul className="nf-ai-steps" role="list">
-                {FILE2FLOW_AI_PIPELINE_STEPS.map((step, i) => {
-                  const prePipeline = aiPipelineIndex < 0;
-                  const state = aiStepStates[step.id]; // 'active' | 'done' | 'skipped' | undefined
+                {FILE2FLOW_AI_PIPELINE_STEPS.map((step) => {
+                  const state = aiStepStates[step.id] || (analyzing ? 'pending' : undefined);
                   const active = state === 'active';
                   const skipped = state === 'skipped';
                   const done = state === 'done';
-                  const pending = !state && !prePipeline;
+                  const pending = state === 'pending';
+                  const nowMs = Date.now();
+                  void aiTick;
                   return (
                     <li
                       key={step.id}
                       className={
                         'nf-ai-step' +
-                        (prePipeline ? ' nf-ai-step--upcoming' : '') +
                         (done ? ' nf-ai-step--done' : '') +
                         (skipped ? ' nf-ai-step--done nf-ai-step--skipped' : '') +
                         (active ? ' nf-ai-step--active' : '') +
@@ -2358,18 +2519,7 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
                       </div>
                       <div className="nf-ai-step-text">
                         <span className="nf-ai-step-label">{step.label}</span>
-                        {active ? (
-                          <span className="nf-ai-step-meta">In progress</span>
-                        ) : null}
-                        {done ? (
-                          <span className="nf-ai-step-meta nf-ai-step-meta--done">Done</span>
-                        ) : null}
-                        {skipped ? (
-                          <span className="nf-ai-step-meta nf-ai-step-meta--done">Skipped</span>
-                        ) : null}
-                        {pending ? (
-                          <span className="nf-ai-step-meta nf-ai-step-meta--wait">Queued</span>
-                        ) : null}
+                        {renderStepMeta(step.id, state, aiStepMeta[step.id], aiStepTimes, nowMs)}
                       </div>
                     </li>
                   );

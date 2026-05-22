@@ -399,6 +399,65 @@ function ensureMaterialsArray(raw) {
   return [];
 }
 
+/** Nodes that may only emit edges from the single right-side `out` port (max one outgoing edge). */
+function isSingleOutletBuilderNode(node) {
+  return ['definition', 'action', 'handler', 'publish', 'start'].includes(node?.type);
+}
+
+/**
+ * Enforce canvas edge rules: one DEFINITION/ACTION/… outlet (`out`, max 1 edge);
+ * DECISION edges only from valid answer ports (max 1 per answer).
+ */
+function sanitizeBuilderEdges(nodes, edges) {
+  const byId = new Map((nodes || []).map((n) => [n.id, n]));
+  const out = [];
+  const outletUsed = new Set();
+
+  for (const e of edges || []) {
+    const src = byId.get(e.from);
+    const tgt = byId.get(e.to);
+    if (!src || !tgt) continue;
+
+    let fromPort = e.fromPort;
+    if (src.type === 'decision') {
+      const answers = src.answers || [];
+      if (!answers.some((a) => a.id === fromPort)) {
+        const free = answers.find((a) => !outletUsed.has(`${e.from}|${a.id}`));
+        if (!free) continue;
+        fromPort = free.id;
+      }
+    } else if (isSingleOutletBuilderNode(src)) {
+      fromPort = 'out';
+      if (out.some((x) => x.from === e.from)) continue;
+    } else {
+      fromPort = 'out';
+    }
+
+    const key = `${e.from}|${fromPort}`;
+    if (outletUsed.has(key)) continue;
+    outletUsed.add(key);
+
+    out.push({
+      ...e,
+      from: e.from,
+      to: e.to,
+      fromPort,
+      toPort: 'in',
+    });
+  }
+  return out;
+}
+
+/** Map stored fromPort to the DOM port id used for rendering / hit-testing. */
+function resolveBuilderFromPort(node, fromPort) {
+  if (!node) return 'out';
+  if (node.type === 'decision') {
+    if (node.answers?.some((a) => a.id === fromPort)) return fromPort;
+    return node.answers?.[0]?.id ?? fromPort;
+  }
+  return 'out';
+}
+
 function backendFlowToBuilderGraph(flow) {
   if (!flow) return { nodes: SEED_NODES, edges: SEED_EDGES };
   const nodes = (flow.nodes || []).map((node) => {
@@ -462,17 +521,26 @@ function backendFlowToBuilderGraph(flow) {
   const backendTypeById = {};
   (flow.nodes || []).forEach(function(n) { backendTypeById[n.id] = n.type; });
 
-  const edges = (flow.edges || []).map((edge) => ({
-    id: edge.id,
-    from: edge.sourceNodeId,
-    // DEFINITION nodes have exactly one output port ('out'). Some AI-generated flows store a
-    // non-null sourceAnswerId on the definition→decision edge, which is a generation artifact.
-    // Normalise it here so the edge always targets the registered 'out' port on the canvas.
-    fromPort: backendTypeById[edge.sourceNodeId] === 'DEFINITION' ? 'out' : (edge.sourceAnswerId || 'out'),
-    to: edge.targetNodeId,
-    toPort: 'in',
-    locked: edge.isDeletable === false,
-  }));
+  const edges = sanitizeBuilderEdges(
+    nodes,
+    (flow.edges || []).map((edge) => {
+      const srcType = backendTypeById[edge.sourceNodeId];
+      let fromPort = edge.sourceAnswerId || 'out';
+      if (srcType === 'DEFINITION' || srcType === 'ACTION' || srcType === 'HANDLER') {
+        fromPort = 'out';
+      } else if (srcType === 'DECISION') {
+        fromPort = edge.sourceAnswerId || null;
+      }
+      return {
+        id: edge.id,
+        from: edge.sourceNodeId,
+        fromPort,
+        to: edge.targetNodeId,
+        toPort: 'in',
+        locked: edge.isDeletable === false,
+      };
+    })
+  );
   return autoLayoutBuilderGraph({ nodes, edges });
 }
 
@@ -826,12 +894,17 @@ const portPos = (node, portId) => {
   if (portId === 'in') {
     return { x: node.x, y: node.y + h / 2 };
   }
-  if (portId === 'out') {
+  if (node.type === 'decision') {
+    const idx = node.answers?.findIndex((a) => a.id === portId);
+    if (idx >= 0) {
+      return { x: node.x + NODE_W, y: node.y + decisionPortLocalCenterY(node, idx) };
+    }
+    if (node.answers?.length) {
+      return { x: node.x + NODE_W, y: node.y + decisionPortLocalCenterY(node, 0) };
+    }
     return { x: node.x + NODE_W, y: node.y + h / 2 };
   }
-  const idx = node.answers?.findIndex(a => a.id === portId);
-  if (idx < 0) return { x: node.x + NODE_W, y: node.y + h / 2 };
-  return { x: node.x + NODE_W, y: node.y + decisionPortLocalCenterY(node, idx) };
+  return { x: node.x + NODE_W, y: node.y + h / 2 };
 };
 
 const bezier = (a, b) => {
@@ -1035,7 +1108,7 @@ function applyAssistantOperationsToGraph(nodes, edges, operations) {
 
   return {
     nodes: ensureDefinitionNode(nextNodes),
-    edges: nextEdges,
+    edges: sanitizeBuilderEdges(nextNodes, nextEdges),
     applied,
     skipped,
   };
