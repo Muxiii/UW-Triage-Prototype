@@ -791,9 +791,13 @@ input, textarea { font-family: inherit; color: inherit; }
 }
 .nf-ai-step-meta {
   font-size: 11px;
-  font-weight: 600;
-  color: var(--purple-600);
-  letter-spacing: 0.02em;
+  font-weight: 500;
+  color: var(--ink-500);
+  letter-spacing: 0.01em;
+}
+.nf-ai-step--active .nf-ai-step-meta {
+  color: var(--ink-500);
+  font-weight: 500;
 }
 .nf-ai-step-meta--done {
   color: var(--ink-500);
