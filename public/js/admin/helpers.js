@@ -342,10 +342,13 @@ async function extractUrlTextForAi(url) {
 }
 
 /**
- * Merge description, uploaded file text, and URL page text for file2flow / AI Assistant.
- * At least one of desc, file, or url must yield non-empty text.
+ * Merge description, uploaded file text, and one-or-more URL pages for
+ * file2flow / AI Assistant. At least one input must yield non-empty text.
+ *
+ * Accepts either `urls: string[]` (new) or `url: string` (legacy single).
+ * Empty / duplicate URLs are removed before fetching.
  */
-async function buildFile2flowSourceText({ desc = '', file = null, url = '' }) {
+async function buildFile2flowSourceText({ desc = '', file = null, urls = [], url = '' }) {
   const parts = [];
   const description = String(desc || '').trim();
   if (description) parts.push(description);
@@ -355,15 +358,34 @@ async function buildFile2flowSourceText({ desc = '', file = null, url = '' }) {
     if (fileText) parts.push(fileText);
   }
 
-  const urlTrimmed = String(url || '').trim();
-  if (urlTrimmed) {
-    const urlText = await extractUrlTextForAi(urlTrimmed);
+  let urlList = Array.isArray(urls) ? urls : [];
+  urlList = urlList.map((u) => String(u || '').trim()).filter(Boolean);
+  if (!urlList.length && url) {
+    const single = String(url || '').trim();
+    if (single) urlList = [single];
+  }
+  urlList = [...new Set(urlList)]; // de-dupe so the same URL isn't fetched twice
+
+  for (const u of urlList) {
+    const urlText = await extractUrlTextForAi(u);
     if (urlText) {
-      parts.push(`--- Content from ${urlTrimmed} ---\n\n${urlText}`);
+      parts.push(`--- Content from ${u} ---\n\n${urlText}`);
     }
   }
 
   return parts.join('\n\n').trim();
+}
+
+/** First non-empty URL in a list, or null. Used to set sourceUrl metadata. */
+function firstUrlFromList(urls, fallbackUrl = '') {
+  if (Array.isArray(urls)) {
+    for (const u of urls) {
+      const t = String(u || '').trim();
+      if (t) return t;
+    }
+  }
+  const f = String(fallbackUrl || '').trim();
+  return f || null;
 }
 
 /** Backend / AI may store `materials` as a single object or string; builder always uses an array. */
