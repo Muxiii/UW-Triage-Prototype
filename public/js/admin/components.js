@@ -337,10 +337,10 @@ function NodeView({ node, selected, onPointerDown, onUpdate, onDelete, onDuplica
                       value={a.rationale || ''}
                       onChange={(e) => onUpdate({ answers: node.answers.map(x => x.id === a.id ? { ...x, rationale: e.target.value } : x) })}
                       onPointerDown={(e) => e.stopPropagation()}
-                      placeholder="判断依据：文档中如何界定该选项适用…"
+                      placeholder="Rationale: how the document supports this branch…"
                       rows={3}
                     />
-                    <button type="button" className="answer-rationale-collapse" onPointerDown={(e) => e.stopPropagation()} onClick={() => onUpdate({ answers: node.answers.map(x => x.id === a.id ? { ...x, rationaleExpanded: false } : x) })}>收起</button>
+                    <button type="button" className="answer-rationale-collapse" onPointerDown={(e) => e.stopPropagation()} onClick={() => onUpdate({ answers: node.answers.map(x => x.id === a.id ? { ...x, rationaleExpanded: false } : x) })}>Collapse</button>
                   </div>
                 ) : (
                   <button
@@ -350,7 +350,7 @@ function NodeView({ node, selected, onPointerDown, onUpdate, onDelete, onDuplica
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={() => onUpdate({ answers: node.answers.map(x => x.id === a.id ? { ...x, rationaleExpanded: true } : x) })}
                   >
-                    {(a.rationale || '').trim() || '判断依据（点击展开编辑）…'}
+                    {(a.rationale || '').trim() || 'Rationale (click to expand)…'}
                   </button>
                 )
               )}
@@ -1372,13 +1372,13 @@ function InspectSettings({ selection, allNodes, flowDescription, setFlowDescript
                     disabled={(n.answers?.length || 0) <= 1}
                   >×</button>
                 </div>
-                <div className="inspect-sublabel">判断依据</div>
+                <div className="inspect-sublabel">Rationale</div>
                 <textarea
                   className="inspect-textarea inspect-rationale-ta"
                   rows={2}
                   value={ans.rationale || ''}
                   onChange={(e) => updateAnswerRationale(ans.id, e.target.value)}
-                  placeholder="文档中如何界定该选项适用（画布节点上可单行预览、点击展开）"
+                  placeholder="How the document supports this branch (one-line preview on canvas; click to expand)"
                 />
               </div>
             ))}
