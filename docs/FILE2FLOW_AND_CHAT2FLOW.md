@@ -43,7 +43,7 @@ flowchart LR
 
 | 步骤 | 提示词文件 / 函数 | `callAi` | 输入要点 |
 |------|-------------------|----------|----------|
-| **0. 智能 URL 探索** | `prompts/file2flow/00-smart-url-exploration.md` + `smartExploreUrlsInSourceText()` | 是（仅当 sourceText 中含 URL 才调；可跳过） | 扫 sourceText 抓 http(s) URL（上限 8 个候选）→ LLM 决定哪些值得 follow（上限 3 个）→ 服务端 fetch 每个并 append；**只走一轮**，不递归。失败开（fail-open）：任何错误返回原 sourceText |
+| **0. 智能 URL 探索** | `prompts/file2flow/00-smart-url-exploration.md` + `smartExploreUrlsInSourceText()` | 是（仅当 sourceText 中含 URL 才调；可跳过） | 扫 sourceText 抓 http(s) URL（上限 12 个候选）→ LLM 决定哪些值得 follow（上限 6 个）→ 服务端 fetch 每个并 append；**只走一轮**，不递归。失败开（fail-open）：任何错误返回原 sourceText |
 | 1. 转述 | `prompts/file2flow/01-source-restatement.md` | 是（可跳过） | 固定英文指令 + `---` + 步骤 0 增强后的 `sourceText` |
 | 1b. 标题 | `prompts/file2flow/01b-flow-title-from-restatement.md` | 是（可跳过） | 转述全文 + 前端草稿 `name` / `sourceFile` → **简洁名**（含文书类型）；写入 `pipelineInput.name` 并覆盖最终 `flowName` 与 DEFINITION 节点 `label` |
 | 2. 预处理 | `prompts/file2flow/02-source-preprocess.md` | 是（可跳过） | **转述后**全文 `{{SOURCE_TEXT}}` → `candidatePoints`、分支 dossier 等 |
@@ -116,17 +116,17 @@ sourceText = desc + fileText + ("--- Content from <url1> ---\n\n" + urlText1) + 
 **目的**：用户的源文档常常说「步骤详见 `https://...`」，但那个 URL 的内容并没有被前端 fetch（如果用户没在 URL 输入框里填它）。这一步让流水线**自动**判断要不要去 follow 这些"内嵌"URL，把内容拉进来。
 
 **算法**：
-1. 用 regex 扫 `sourceText`，提取所有 `https?://` URL，去重，截断到 **8 个**候选。
+1. 用 regex 扫 `sourceText`，提取所有 `https?://` URL，去重，截断到 **12 个**候选。
 2. 没找到任何 URL → 跳过，直接返回原文本。
 3. 调一次 LLM（`00-smart-url-exploration.md`），输入：
    - `{{SOURCE_TEXT_PREVIEW}}`：前 8K 字的源文本（让 LLM 看到每个 URL 的上下文）
    - `{{CANDIDATE_URLS_JSON}}`：候选 URL JSON 数组
-4. LLM 输出 `{ follow: [], skip: [], reasoning: "" }`。服务端只信 `follow` 里**严格匹配**候选列表的 URL，再截到 **3 个**。
+4. LLM 输出 `{ follow: [], skip: [], reasoning: "" }`。服务端只信 `follow` 里**严格匹配**候选列表的 URL，再截到 **6 个**。
 5. 对每个 follow URL 调 `fetchUrlAsText`（同 `/api/extract-url-text`，含链接保留），失败的 URL 静默记录到 `fetchErrors`。
 6. 把抓回的内容用 `--- Followed link <url> ---\n\n<text>` 头部分段拼到原 sourceText 末尾。
 7. **只走一轮**：抓回来的新内容不再被扫一遍 URL。
 
-**常量**：`FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES` (8), `FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW` (3), `FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS` (8000)。
+**常量**：`FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES` (12), `FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW` (6), `FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS` (8000)。
 
 **失败开（fail-open）**：LLM 调用失败、JSON 解析失败、URL fetch 失败、网络超时 —— **任何**异常都返回原 sourceText 不阻塞主流程，错误细节落 `step0_smartUrlExploration` 调试字段。
 

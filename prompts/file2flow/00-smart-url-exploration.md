@@ -12,7 +12,7 @@ Inputs (placeholders filled by server.mjs):
                             (up to FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES).
 
 Output: ONE JSON object, no prose. The server caps `follow` at
-FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW (default 3).
+FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW (default 6).
 
 Notes for the model:
   - We will follow each chosen URL exactly once (no recursive expansion).
@@ -40,26 +40,33 @@ downstream graph builder has more context.
 
 # Decision rules
 
-Mark a URL as **follow** only when:
+Mark a URL as **follow** when ANY of these apply:
 
 - The surrounding text explicitly points the reader to that URL for additional
-  procedure / sub-steps / forms / definitions that the source does not already
-  contain in full (e.g. *"see details at …"*, *"steps available here"*, *"refer
-  to …"*).
-- The URL points to a substantive web page (HTML), not a binary file.
+  procedure / sub-steps / forms / definitions (e.g. *"see details at …"*,
+  *"steps available here"*, *"refer to …"*).
+- The URL appears inline within a procedural step, instruction, or requirement —
+  even without explicit "go here" language — suggesting it is part of the workflow.
+- The URL hostname or path suggests it hosts official process documentation,
+  portals, forms, or policy pages relevant to the workflow domain
+  (e.g. a government site, an internal company domain, a known document system).
+- The source text references the URL in a context that implies the reader needs
+  it to complete a task (e.g. a link labeled with an action verb, a form name,
+  or a system/tool name).
 
 Mark as **skip** when:
 
-- The URL looks like a footer, citation, terms-of-service, privacy, contact,
-  login, signup, calendar, map, or marketing link.
-- The URL points to a PDF, image, video, or downloadable file.
+- The URL is clearly a footer, citation, terms-of-service, privacy policy,
+  cookie banner, contact page, login/signup, calendar, map, or pure marketing link.
+- The URL points to a PDF, image, video, or downloadable binary file.
 - The URL is a social-media or third-party site unrelated to the workflow
-  (Twitter, LinkedIn, YouTube, Facebook, etc.).
+  (Twitter / X, LinkedIn, YouTube, Facebook, Instagram, etc.).
 - The URL is a duplicate or fragment of one you already chose to follow.
-- The source text already explains everything the URL would add.
+- The source text already fully explains everything the URL would add.
 
-Be conservative: when in doubt, **skip**. We only do one exploration round, so
-we'd rather miss a marginal page than waste tokens on irrelevant ones.
+When in doubt, **follow**: incomplete workflow context is more harmful than
+fetching a marginally relevant page. We only do one exploration round — prefer
+capturing useful content over being conservative.
 
 # Output
 
@@ -75,4 +82,4 @@ Return exactly **one** JSON object with these three fields, and nothing else:
 
 The strings in `follow` and `skip` must be exact, character-for-character copies
 of URLs from the candidate list above. Do not invent new URLs. The maximum size
-of `follow` is **3** — if more would be useful, pick the 3 highest-value ones.
+of `follow` is **6** — if more would be useful, pick the 6 highest-value ones.

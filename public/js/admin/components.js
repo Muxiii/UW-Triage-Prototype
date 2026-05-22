@@ -2058,9 +2058,9 @@ const FILE2FLOW_AI_PIPELINE_STEPS = [
 
 function formatStepDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return '';
-  if (ms < 1000) return `${Math.max(1, Math.round(ms))} ms`;
+  if (ms < 1000) return '<1s';
   const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)} s`;
+  if (s < 60) return `${Math.floor(s)} s`;
   const m = Math.floor(s / 60);
   const rem = Math.round(s % 60);
   return rem ? `${m} m ${rem} s` : `${m} m`;
@@ -2205,7 +2205,7 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
     if (!analyzing) return undefined;
     const hasActive = Object.values(aiStepStates).some((s) => s === 'active');
     if (!hasActive) return undefined;
-    const id = setInterval(() => setAiTick((n) => n + 1), 200);
+    const id = setInterval(() => setAiTick((n) => n + 1), 1000);
     return () => clearInterval(id);
   }, [analyzing, aiStepStates]);
 

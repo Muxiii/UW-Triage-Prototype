@@ -965,8 +965,8 @@ function generateFallbackGraph({ name, sourceFile, sourceText }) {
 
 const FILE2FLOW_DEBUG_PATH = path.join(__dirname, 'data', 'file2flow-debug-last.json');
 
-const FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES = 8;
-const FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW = 3;
+const FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES = 12;
+const FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW = 6;
 const FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS = 8000;
 
 /**
