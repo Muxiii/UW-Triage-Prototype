@@ -966,8 +966,29 @@ function generateFallbackGraph({ name, sourceFile, sourceText }) {
 const FILE2FLOW_DEBUG_PATH = path.join(__dirname, 'data', 'file2flow-debug-last.json');
 
 const FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES = 12;
-const FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW = 6;
+const FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW = 10;
 const FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS = 8000;
+
+/** Take LLM `follow` URLs as-is (valid http/https only), de-dupe, cap at MAX_FOLLOW. */
+function parseLlmFollowUrls(followList) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of followList) {
+    const trimmed = String(raw || '').trim().replace(/[.,;:!?)\]]+$/, '');
+    if (!trimmed) continue;
+    let href;
+    try {
+      href = normalizeUrlForFetch(trimmed);
+    } catch {
+      continue;
+    }
+    if (seen.has(href)) continue;
+    seen.add(href);
+    out.push(href);
+    if (out.length >= FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW) break;
+  }
+  return out;
+}
 
 /**
  * Step 0 — smart URL exploration (one round only, no recursion).
@@ -1046,20 +1067,15 @@ async function smartExploreUrlsInSourceText(sourceText, config) {
     console.warn('[smart-url-exploration] LLM call / parse failed:', parseError);
   }
 
-  let toFollow = [];
+  let queuedFollow = [];
   if (llmDecision && Array.isArray(llmDecision.follow)) {
-    toFollow = llmDecision.follow
-      .map((u) => String(u || '').trim())
-      .filter((u) => candidates.includes(u))
-      .slice(0, FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW);
-    // De-dupe in case the model repeated entries.
-    toFollow = [...new Set(toFollow)];
+    queuedFollow = parseLlmFollowUrls(llmDecision.follow);
   }
 
   const followed = [];
   const fetchErrors = [];
   const appendedSections = [];
-  for (const u of toFollow) {
+  for (const u of queuedFollow) {
     try {
       const r = await fetchUrlAsText(u);
       const text = String(r.text || '').trim();
@@ -1085,6 +1101,7 @@ async function smartExploreUrlsInSourceText(sourceText, config) {
     rawAi,
     llmDecision: llmDecision || null,
     parseError,
+    queuedFollow,
     followed,
     fetchErrors,
     appendedChars: augmented.length - original.length,
@@ -1252,6 +1269,7 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
           candidates: smartExplore.candidates,
           llmDecision: smartExplore.llmDecision,
           parseError: smartExplore.parseError ?? null,
+          queuedFollow: smartExplore.queuedFollow ?? [],
           followed: smartExplore.followed,
           fetchErrors: smartExplore.fetchErrors,
           appendedChars: smartExplore.appendedChars,
