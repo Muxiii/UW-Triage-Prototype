@@ -56,11 +56,11 @@ flowchart LR
 
 ## 2. 前端：输入准备（File2Flow / Chat2Flow）
 
-**文件**：`public/js/admin/components.js`（`NewFlowModal`）、`public/js/admin/helpers.js`（`extractUploadTextForAi`）。
+**文件**：`public/js/admin/components.js`（`NewFlowModal`）、`public/js/admin/helpers.js`（`extractUploadTextForAi`、`extractUrlTextForAi`、`buildFile2flowSourceText`）。
 
 ### 2.1 校验
 
-- 合并后 `sourceText.trim()` 为空则报错：须至少提供 **描述**、**上传文件正文** 或 **粘贴正文** 之一。
+- 合并后 `sourceText.trim()` 为空则报错：须至少提供 **描述**、**URL 抓取正文**、**上传文件正文** 之一。
 
 ### 2.2 文件 → 纯文本（仅 File2Flow 分支）
 
@@ -71,11 +71,24 @@ flowchart LR
 - **`.pdf`**：浏览器 **pdf.js**（`admin.html` 加载 3.11.x + worker）逐页 `getTextContent` 拼接；纯扫描件无文字层时需 OCR 或改粘贴正文。
 - **`.doc`（Word 97–2003）**：浏览器无法可靠解析，经 **`POST /api/extract-doc-text`**（JSON：`filename`、`base64`）由服务端 **`word-extractor`** 从缓冲区抽正文；体积上限约 **18 MB**。
 
+### 2.2b URL → 纯文本
+
+`extractUrlTextForAi(url)` → **`POST /api/extract-url-text`**（JSON：`url`）：
+
+- 仅 **http/https**；服务端 `fetch` 页面（超时约 20s，响应体上限约 2 MB）。
+- **HTML** 经去标签转为纯文本；**text/plain** 直接使用。
+- **PDF 直链**会报错，提示改走「上传文档」用 pdf.js 提取。
+- 需登录、强反爬或非 HTML 的页面可能失败，此时请粘贴正文。
+
 ### 2.3 合并规则
 
+`buildFile2flowSourceText({ desc, file, url })`：
+
 ```text
-sourceText = [desc, fileText].filter(Boolean).join("\n\n")
+sourceText = desc + fileText + ("--- Content from <url> ---\n\n" + urlText)
 ```
+
+（非空段用 `\n\n` 连接。）
 
 ### 2.4 请求与 UI 反馈
 

@@ -1595,11 +1595,7 @@ function AiAssistantPanel({ graph, flowTitle, onApplyAssistantOperations, onUndo
   const [plan, setPlan] = useState('');
   const [lastResult, setLastResult] = useState(null);
 
-  const buildSourceText = async () => {
-    let fileText = '';
-    if (file) fileText = await extractUploadTextForAi(file);
-    return [desc, fileText].filter(Boolean).join('\n\n').trim();
-  };
+  const buildSourceText = async () => buildFile2flowSourceText({ desc, file, url });
 
   const runAssistant = async () => {
     setBusy(true);
@@ -2046,19 +2042,20 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
       setPrepStep('Detecting file type and input source…');
       await sleep(PREP_MS);
 
-      let fileText = '';
-      if (file) {
+      if (file && url.trim()) {
+        setPrepStep('Extracting text from document and URL…');
+      } else if (file) {
         setPrepStep('Extracting text from document…');
-        fileText = await extractUploadTextForAi(file);
-        await sleep(PREP_MS);
+      } else if (url.trim()) {
+        setPrepStep('Fetching text from URL…');
+      } else {
+        setPrepStep('Preparing materials (description, body text)…');
       }
 
-      setPrepStep('Preparing materials (description, links, body text)…');
+      const sourceText = await buildFile2flowSourceText({ desc, file, url });
       await sleep(PREP_MS);
-
-      const sourceText = [desc, fileText].filter(Boolean).join('\n\n');
-      if (!sourceText.trim()) {
-        throw new Error('Please upload a file, add a description, or paste policy text (at least one).');
+      if (!sourceText) {
+        throw new Error('Please upload a file, add a URL, add a description, or paste policy text (at least one).');
       }
 
       startPipelineProgressTimer();
