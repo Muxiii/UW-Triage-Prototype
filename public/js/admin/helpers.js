@@ -321,6 +321,51 @@ async function extractUploadTextForAi(file) {
   return file.text();
 }
 
+/** Fetch a public http(s) page and return plain text (server-side HTML → text). */
+async function extractUrlTextForAi(url) {
+  const trimmed = String(url || '').trim();
+  if (!trimmed) return '';
+  const res = await fetch(`${API_BASE}/extract-url-text`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: trimmed }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.error || `Could not read URL (${res.status}). Paste text in Description instead.`);
+  }
+  const text = String(data.text || '').trim();
+  if (!text) {
+    throw new Error('No extractable text at this URL. Paste content in Description or upload a file.');
+  }
+  return text;
+}
+
+/**
+ * Merge description, uploaded file text, and URL page text for file2flow / AI Assistant.
+ * At least one of desc, file, or url must yield non-empty text.
+ */
+async function buildFile2flowSourceText({ desc = '', file = null, url = '' }) {
+  const parts = [];
+  const description = String(desc || '').trim();
+  if (description) parts.push(description);
+
+  if (file) {
+    const fileText = await extractUploadTextForAi(file);
+    if (fileText) parts.push(fileText);
+  }
+
+  const urlTrimmed = String(url || '').trim();
+  if (urlTrimmed) {
+    const urlText = await extractUrlTextForAi(urlTrimmed);
+    if (urlText) {
+      parts.push(`--- Content from ${urlTrimmed} ---\n\n${urlText}`);
+    }
+  }
+
+  return parts.join('\n\n').trim();
+}
+
 /** Backend / AI may store `materials` as a single object or string; builder always uses an array. */
 function ensureMaterialsArray(raw) {
   if (raw == null) return [];

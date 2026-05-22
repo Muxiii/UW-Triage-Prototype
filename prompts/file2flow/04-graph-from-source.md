@@ -25,7 +25,7 @@ Rules:
 - **Coverage over connectivity:** With **candidatePoints lockstep** above, **`nodes.length` must equal the number of candidate points** in the JSON. **Do not drop nodes** to simplify.
 - **If there is no candidatePoints block** below: the graph **need not be fully connected**; ACTION/DECISION may have zero incoming edges when wiring is uncertain. With candidatePoints + `predecessorId`, wire every non-root point from its predecessor as above.
 - Linear procedures: chain ACTION→ACTION or ACTION→DECISION with at most one edge per ACTION when you do wire them; use multi-answer DECISION only for branches (typically 2+ options). Prefer explicit stages rather than merging unrelated obligations into one node.
-- Use double-quoted JSON keys and string values only. No comments. No trailing commas.
+- Use double-quoted JSON keys and string values only. **No `//` or `/* */` comments.** Never use ellipsis placeholders such as `// ... (other nodes)` — write **every** node and edge object in full. No trailing commas.
 
 Flow name: {{FLOW_NAME}}
 Source URL: {{SOURCE_URL}}

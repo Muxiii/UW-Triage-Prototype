@@ -1095,6 +1095,8 @@ async function generateGraph(input, debugFile2flow = false) {
       }
     : null;
   let preprocessDossier = '';
+  /** @type {{ candidatePoints?: object[], earlyForks?: object[] } | null} */
+  let preprocessMergedParsed = null;
   if (process.env.AI_SKIP_SOURCE_PREPROCESS === '1') {
     if (snap) snap.step2_preprocess = { skippedByEnv: 'AI_SKIP_SOURCE_PREPROCESS=1' };
     try {
@@ -1148,6 +1150,7 @@ async function generateGraph(input, debugFile2flow = false) {
         completionBundle = { skippedByEnv: 'AI_SKIP_CANDIDATE_POINT_COMPLETION=1' };
       }
       preprocessDossier = formatPreprocessDossier(mergedParsed);
+      preprocessMergedParsed = mergedParsed;
       if (snap) snap.step2_preprocess = bundle;
       if (snap) snap.step2d_candidatePointCompletion = completionBundle;
       if (snap) snap.step2c_dossierStringInjectedIntoGraphPrompt = preprocessDossier;
@@ -1228,7 +1231,7 @@ async function generateGraph(input, debugFile2flow = false) {
   const graphRawAi = await callAi(graphPrompt, config);
   if (snap) snap.step3_graphRawAiText = graphRawAi;
 
-  let jsonText = extractJsonCandidate(graphRawAi);
+  let jsonText = stripJsStyleJsonComments(extractJsonCandidate(graphRawAi));
   if (snap) {
     snap.step3_graphExtractedJsonCandidate = jsonText;
     snap.step3_graphRepairLog = [];
@@ -1242,7 +1245,7 @@ async function generateGraph(input, debugFile2flow = false) {
     try {
       const repaired = await repairJsonWithAi(jsonText, error.message, config, 'a UW agreement triage graph');
       if (snap) snap.step3_graphRepairLog.push({ stage: 'aiRepairRaw', text: repaired });
-      jsonText = extractJsonCandidate(repaired);
+      jsonText = stripJsStyleJsonComments(extractJsonCandidate(repaired));
       if (snap) {
         snap.step3_graphExtractedJsonAfterAiRepair = jsonText;
       }
@@ -1250,7 +1253,7 @@ async function generateGraph(input, debugFile2flow = false) {
     } catch (repairError) {
       if (snap) snap.step3_graphRepairLog.push({ stage: 'aiRepairParse', error: repairError.message });
       try {
-        parsed = JSON.parse(repairCommonJsonIssues(jsonText));
+        parsed = JSON.parse(repairCommonJsonIssues(stripJsStyleJsonComments(jsonText)));
         if (snap) snap.step3_graphRepairLog.push({ stage: 'localRepair', note: 'repairCommonJsonIssues applied' });
       } catch (localRepairError) {
         if (snap) {
@@ -1269,6 +1272,23 @@ async function generateGraph(input, debugFile2flow = false) {
         );
       }
     }
+  }
+
+  const candidatePoints = preprocessMergedParsed?.candidatePoints;
+  if (Array.isArray(candidatePoints) && candidatePoints.length > 0) {
+    const mergeResult = mergeParsedGraphWithCandidatePoints(
+      parsed,
+      candidatePoints,
+      preprocessMergedParsed?.earlyForks,
+      pipelineInput
+    );
+    parsed = mergeResult.merged;
+    if (mergeResult.note?.addedNodes > 0) {
+      console.warn(
+        `[file2flow] merged ${mergeResult.note.addedNodes} missing node(s) from candidatePoints (${mergeResult.note.parsedCount} → ${mergeResult.note.mergedCount})`
+      );
+    }
+    if (snap) snap.step3_candidatePointsMerge = mergeResult.note;
   }
 
   if (snap) snap.step3_graphParsedJson = parsed;
@@ -1344,6 +1364,199 @@ async function generateGraph(input, debugFile2flow = false) {
   return normalized;
 }
 
+/** Strip `//` line comments (common when the model elides nodes with "..."). */
+function stripJsStyleJsonComments(text) {
+  let fixed = String(text || '');
+  fixed = fixed.replace(/\/\*[\s\S]*?\*\//g, '');
+  fixed = fixed.replace(/^\s*\/\/[^\n]*/gm, '');
+  fixed = fixed.replace(/,\s*\/\/[^\n]*/g, '');
+  fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+  return fixed;
+}
+
+function likelyKindToNodeType(likelyKind) {
+  const k = String(likelyKind || '').toUpperCase();
+  if (k === 'DEFINITION') return NodeType.DEFINITION;
+  if (k === 'DECISION') return NodeType.DECISION;
+  if (k === 'PEOPLE') return NodeType.PEOPLE;
+  return NodeType.ACTION;
+}
+
+function scaffoldContentForNodeType(type, cp) {
+  const title = String(cp.title || '').trim();
+  const rationale = String(cp.rationale || '').trim();
+  if (type === NodeType.DEFINITION) {
+    return { description: rationale || title, relatedOffices: [], templates: [], resources: [] };
+  }
+  if (type === NodeType.DECISION) {
+    return { question: title || 'Next step?' };
+  }
+  return { title, description: rationale, assigneeKind: '', assignee: '', materials: [] };
+}
+
+function branchHintForChildPoint(childCp, branches) {
+  const title = String(childCp?.title || '').toLowerCase();
+  const rat = String(childCp?.rationale || '').toLowerCase();
+  const blob = `${title} ${rat}`;
+  if (/comotion|intellectual property|innovation|cda guideline/i.test(blob)) {
+    return branches.find((b) => /comotion/i.test(String(b.answerTextHint || ''))) || branches[1];
+  }
+  if (/dean|副院长|dua|dtua|patient data|som/i.test(blob)) {
+    return branches.find((b) => /dean|som/i.test(String(b.answerTextHint || ''))) || branches[2];
+  }
+  if (/osp|sage|template|naa|egc1|sponsored/i.test(blob)) {
+    return branches.find((b) => /osp|sage/i.test(String(b.answerTextHint || ''))) || branches[0];
+  }
+  return null;
+}
+
+function buildDecisionAnswersForChildren(parentId, childIds, childById, earlyForks) {
+  if (childIds.length === 1) {
+    const onlyChild = childIds[0];
+    return [
+      {
+        tempId: `${parentId}-a1`,
+        text: 'Continue',
+        order: 1,
+        rationale: String(childById.get(onlyChild)?.rationale || '').trim(),
+        _childId: onlyChild,
+      },
+    ];
+  }
+  const fork = (earlyForks || []).find((f) => Array.isArray(f.branches) && f.branches.length >= childIds.length) ||
+    (earlyForks || [])[0];
+  const branches = fork?.branches || [];
+  const usedBranchKeys = new Set();
+  const ordered = childIds.map((childId, idx) => {
+    const childCp = childById.get(childId);
+    let branch = childCp ? branchHintForChildPoint(childCp, branches) : null;
+    if (branch?.branchKey) usedBranchKeys.add(branch.branchKey);
+    if (!branch) branch = branches[idx] || { answerTextHint: `Option ${idx + 1}`, earlyEvidence: '' };
+    return { childId, branch, order: idx + 1 };
+  });
+  return ordered.map(({ childId, branch, order }) => ({
+    tempId: `${parentId}-a${order}`,
+    text: String(branch.answerTextHint || branch.branchKey || `Option ${order}`),
+    order,
+    rationale: String(branch.earlyEvidence || branch.notes || '').trim(),
+    _childId: childId,
+  }));
+}
+
+function buildGraphScaffoldFromCandidatePoints(candidatePoints, earlyForks = []) {
+  const points = candidatePoints.filter((cp) => cp && cp.id);
+  const childById = new Map(points.map((cp) => [String(cp.id), cp]));
+  const childrenByParent = new Map();
+  for (const cp of points) {
+    if (!cp.predecessorId) continue;
+    const p = String(cp.predecessorId);
+    if (!childrenByParent.has(p)) childrenByParent.set(p, []);
+    childrenByParent.get(p).push(String(cp.id));
+  }
+
+  const nodes = points.map((cp) => {
+    const tempId = String(cp.id);
+    const type = likelyKindToNodeType(cp.likelyKind);
+    const childIds = childrenByParent.get(tempId) || [];
+    let answers = [];
+    if (type === NodeType.DECISION && childIds.length > 0) {
+      answers = buildDecisionAnswersForChildren(tempId, childIds, childById, earlyForks).map(
+        ({ tempId: aId, text, order, rationale }) => ({ tempId: aId, text, order, rationale })
+      );
+    } else if (type === NodeType.DECISION) {
+      answers = [{ tempId: `${tempId}-a1`, text: 'Continue', order: 1, rationale: '' }];
+    }
+    return {
+      tempId,
+      type,
+      label: String(cp.title || tempId),
+      content: scaffoldContentForNodeType(type, cp),
+      answers,
+    };
+  });
+
+  const answerByChild = new Map();
+  for (const n of nodes) {
+    if (n.type !== NodeType.DECISION) continue;
+    const childIds = childrenByParent.get(n.tempId) || [];
+    if (!childIds.length) continue;
+    const built = buildDecisionAnswersForChildren(n.tempId, childIds, childById, earlyForks);
+    built.forEach((a) => {
+      if (a._childId) answerByChild.set(`${n.tempId}|${a._childId}`, a.tempId);
+    });
+    n.answers = built.map(({ tempId, text, order, rationale }) => ({ tempId, text, order, rationale }));
+  }
+
+  const edges = [];
+  for (const cp of points) {
+    if (!cp.predecessorId) continue;
+    const parentId = String(cp.predecessorId);
+    const childId = String(cp.id);
+    const parentNode = nodes.find((n) => n.tempId === parentId);
+    let sourceAnswerTempId = null;
+    if (parentNode?.type === NodeType.DECISION) {
+      sourceAnswerTempId = answerByChild.get(`${parentId}|${childId}`) || parentNode.answers[0]?.tempId || null;
+    }
+    edges.push({ sourceNodeTempId: parentId, sourceAnswerTempId, targetNodeTempId: childId });
+  }
+
+  return { nodes, edges };
+}
+
+function mergeParsedGraphWithCandidatePoints(parsed, candidatePoints, earlyForks, input) {
+  const expected = candidatePoints.length;
+  const scaffold = buildGraphScaffoldFromCandidatePoints(candidatePoints, earlyForks);
+  const parsedNodes = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
+  const byTemp = new Map();
+  parsedNodes.forEach((n) => {
+    const key = n.tempId || n.id;
+    if (key) byTemp.set(String(key), n);
+  });
+
+  const mergedNodes = scaffold.nodes.map((sn) => {
+    const existing = byTemp.get(sn.tempId);
+    if (!existing) return { ...sn };
+    const content =
+      existing.content && typeof existing.content === 'object'
+        ? { ...sn.content, ...existing.content }
+        : sn.content;
+    const answers =
+      Array.isArray(existing.answers) && existing.answers.length >= (sn.answers?.length || 0)
+        ? existing.answers
+        : sn.answers;
+    return {
+      ...sn,
+      type: existing.type || sn.type,
+      label: existing.label || sn.label,
+      content,
+      answers,
+    };
+  });
+
+  const edgeKey = (e) =>
+    `${e.sourceNodeTempId}|${e.sourceAnswerTempId ?? ''}|${e.targetNodeTempId}`;
+  const edgeMap = new Map();
+  scaffold.edges.forEach((e) => edgeMap.set(edgeKey(e), e));
+  (Array.isArray(parsed?.edges) ? parsed.edges : []).forEach((e) => edgeMap.set(edgeKey(e), e));
+
+  const merged = {
+    flowName: parsed?.flowName || input?.name || 'Generated flow',
+    description: parsed?.description || '',
+    nodes: mergedNodes,
+    edges: Array.from(edgeMap.values()),
+  };
+
+  return {
+    merged,
+    note: {
+      expected,
+      parsedCount: parsedNodes.length,
+      mergedCount: mergedNodes.length,
+      addedNodes: Math.max(0, mergedNodes.length - parsedNodes.length),
+    },
+  };
+}
+
 async function repairJsonWithAi(badJson, parseError, config, schemaHint = 'a UW agreement triage graph') {
   const tpl = await loadFile2flowPrompt('05-json-repair.md');
   const repairPrompt = fillFile2flowPromptPlaceholders(tpl, {
@@ -1355,7 +1568,7 @@ async function repairJsonWithAi(badJson, parseError, config, schemaHint = 'a UW 
 }
 
 function repairCommonJsonIssues(text) {
-  let fixed = String(text || '').trim();
+  let fixed = stripJsStyleJsonComments(String(text || '').trim());
   fixed = fixed.replace(/,\s*([}\]])/g, '$1');
   fixed = fixed.replace(/}\s*{/g, '},{');
   fixed = fixed.replace(/]\s*"/g, '],"');
@@ -1979,6 +2192,102 @@ async function handleFlowAssistant(req, res) {
   }
 }
 
+const MAX_URL_FETCH_BYTES = 2_000_000;
+const URL_FETCH_TIMEOUT_MS = 20_000;
+
+function normalizeUrlForFetch(raw) {
+  const s = String(raw || '').trim();
+  if (!s) throw new Error('URL is required.');
+  let parsed;
+  try {
+    parsed = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`);
+  } catch {
+    throw new Error('Invalid URL.');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Only http and https URLs are supported.');
+  }
+  return parsed.href;
+}
+
+function htmlToPlainText(html) {
+  let t = String(html || '');
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  t = t.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  t = t.replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+  t = t.replace(/<!--[\s\S]*?-->/g, ' ');
+  t = t.replace(/<br\s*\/?>/gi, '\n');
+  t = t.replace(/<\/(p|div|h[1-6]|li|tr|section|article)>/gi, '\n');
+  t = t.replace(/<[^>]+>/g, ' ');
+  t = t
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#(\d+);/g, (_, n) => {
+      const code = Number(n);
+      return Number.isFinite(code) && code > 0 && code < 65536 ? String.fromCharCode(code) : ' ';
+    });
+  t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ');
+  return t.trim();
+}
+
+async function fetchUrlAsText(url) {
+  const href = normalizeUrlForFetch(url);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), URL_FETCH_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(href, {
+      signal: ctrl.signal,
+      redirect: 'follow',
+      headers: {
+        'User-Agent': 'UW-Triage-Prototype/1.0 (file2flow)',
+        Accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8',
+      },
+    });
+  } catch (e) {
+    if (e?.name === 'AbortError') throw new Error('URL fetch timed out. Try again or paste text in Description.');
+    throw new Error(e?.message || 'Could not fetch URL.');
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    throw new Error(`URL fetch failed (HTTP ${res.status}). Check the link or paste text manually.`);
+  }
+  const ctype = (res.headers.get('content-type') || '').toLowerCase();
+  if (ctype.includes('application/pdf')) {
+    throw new Error('This URL points to a PDF. Download the file and upload it under "Upload a document".');
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > MAX_URL_FETCH_BYTES) {
+    throw new Error('Page is too large to extract (over 2 MB). Paste key sections in Description.');
+  }
+  const body = buf.toString('utf8');
+  let text = '';
+  if (ctype.includes('text/html') || /<html[\s>]/i.test(body) || /<body[\s>]/i.test(body)) {
+    text = htmlToPlainText(body);
+  } else {
+    text = body.replace(/\r\n/g, '\n').trim();
+  }
+  if (!text) throw new Error('No readable text found at this URL.');
+  return { text: text.slice(0, 120_000), url: href, contentType: ctype || 'unknown' };
+}
+
+async function handleExtractUrlText(req, res) {
+  try {
+    const body = await readJson(req);
+    const result = await fetchUrlAsText(body.url);
+    return send(res, 200, result);
+  } catch (e) {
+    console.warn('[extract-url-text]', e?.message || e);
+    const msg = e?.message || 'URL extraction failed.';
+    const status = /required|invalid|only http/i.test(msg) ? 400 : /too large|pdf/i.test(msg) ? 422 : 500;
+    return send(res, status, { error: msg });
+  }
+}
+
 async function handleExtractDocText(req, res) {
   try {
     const body = await readJson(req);
@@ -2028,6 +2337,10 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'POST' && url.pathname === '/api/extract-doc-text') {
     return handleExtractDocText(req, res);
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/extract-url-text') {
+    return handleExtractUrlText(req, res);
   }
 
   if (req.method === 'POST' && url.pathname === '/api/assistant') {
