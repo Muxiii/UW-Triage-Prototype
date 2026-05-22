@@ -1556,6 +1556,8 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
         violations: restructureResult.violations,
         pathCount: restructureResult.pathCount,
         cloneCount: restructureResult.cloneCount,
+        pathsDeduped: restructureResult.pathsDeduped ?? 0,
+        constraintNotes: restructureResult.constraintNotes ?? [],
         graphAfter: restructureResult.changed
           ? { nodes: normalized.nodes, edges: normalized.edges }
           : null,
@@ -1809,64 +1811,160 @@ function normalizeActionMaterialsForNode(materials) {
   }));
 }
 
+/** Outgoing-edge key: at most one edge per (sourceNodeId, sourceAnswerId). */
+function edgeOutletKey(sourceNodeId, sourceAnswerId) {
+  return `${sourceNodeId}|${sourceAnswerId ?? ''}`;
+}
+
+/**
+ * Hard structural limits before / after graph build:
+ * - exactly one DEFINITION node
+ * - at most one outgoing edge per DECISION answer (and per DEFINITION / ACTION outlet)
+ */
+function enforceGraphStructuralConstraints(nodes, edges) {
+  const notes = [];
+  let n = Array.isArray(nodes) ? [...nodes] : [];
+  let e = Array.isArray(edges) ? [...edges] : [];
+  const byId = () => new Map(n.map((x) => [x.id, x]));
+
+  const defs = n.filter((x) => x.type === NodeType.DEFINITION);
+  if (defs.length > 1) {
+    const keep = defs[0];
+    const drop = new Set(defs.slice(1).map((d) => d.id));
+    notes.push(`removed_extra_definitions:${drop.size}`);
+    n = n.filter((x) => !drop.has(x.id));
+    const next = [];
+    for (const edge of e) {
+      if (drop.has(edge.sourceNodeId) && drop.has(edge.targetNodeId)) continue;
+      const copy = { ...edge };
+      if (drop.has(copy.sourceNodeId)) copy.sourceNodeId = keep.id;
+      if (drop.has(copy.targetNodeId)) continue;
+      next.push(copy);
+    }
+    e = next;
+  }
+
+  const nodeMap = byId();
+  const seenOutlet = new Set();
+  const pruned = [];
+  for (const edge of e) {
+    if (!nodeMap.get(edge.sourceNodeId) || !nodeMap.get(edge.targetNodeId)) continue;
+    const key = edgeOutletKey(edge.sourceNodeId, edge.sourceAnswerId);
+    if (seenOutlet.has(key)) {
+      notes.push(`dropped_duplicate_outlet:${key}`);
+      continue;
+    }
+    seenOutlet.add(key);
+    pruned.push(edge);
+  }
+  e = pruned;
+
+  return { nodes: n, edges: e, notes, changed: notes.length > 0 };
+}
+
+function findActionToDecisionViolations(nodes, edges, definitionId) {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const isAction = (t) => t === NodeType.ACTION || t === NodeType.HANDLER;
+  const isDecision = (t) => t === NodeType.DECISION;
+  const violations = [];
+  const seenState = new Set();
+  const stack = [{ nodeId: definitionId, seenAction: false }];
+  while (stack.length) {
+    const { nodeId, seenAction } = stack.pop();
+    const stateKey = `${nodeId}|${seenAction ? '1' : '0'}`;
+    if (seenState.has(stateKey)) continue;
+    seenState.add(stateKey);
+    const node = byId.get(nodeId);
+    if (!node) continue;
+    const nextSeenAction = seenAction || isAction(node.type);
+    edges.filter((e) => e.sourceNodeId === nodeId).forEach((edge) => {
+      const target = byId.get(edge.targetNodeId);
+      if (!target) return;
+      if (nextSeenAction && isDecision(target.type)) {
+        violations.push({ from: nodeId, to: edge.targetNodeId, edgeKey: edgeOutletKey(edge.sourceNodeId, edge.sourceAnswerId) });
+      }
+      stack.push({ nodeId: edge.targetNodeId, seenAction: nextSeenAction });
+    });
+  }
+  return violations;
+}
+
+function pathTraversalSignature(path, byId) {
+  const isAction = (t) => t === NodeType.ACTION || t === NodeType.HANDLER;
+  const isDecision = (t) => t === NodeType.DECISION;
+  const parts = [];
+  for (const step of path) {
+    const node = byId.get(step.nodeId);
+    if (!node || node.type === NodeType.DEFINITION) continue;
+    if (isDecision(node.type)) parts.push(`D:${step.nodeId}:${step.portToNext ?? ''}`);
+    else if (isAction(node.type)) parts.push(`A:${step.nodeId}`);
+  }
+  return parts.join('>');
+}
+
 /**
  * Enforces the researcher-portal contract:
  *   every path from DEFINITION must look like DEFINITION → DECISION* → (ACTION|PEOPLE)*
  *
  * Algorithm (pure, no LLM):
- *   1. Walk the graph; if no path violates the constraint, return graph unchanged.
- *   2. Enumerate every simple path from DEFINITION to a leaf.
- *   3. For each path, split into [decisions in original order] + [actions in original order],
- *      then rebuild as decisions → actions.
- *   4. DECISION nodes are shared by id across paths (same question = same node).
- *      ACTION / PEOPLE nodes are CLONED per path so each terminal answer leaf gets its own
- *      checklist chain — this keeps the resulting DAG unambiguous for the researcher walker.
- *   5. Edges are deduped by (source, sourceAnswerId, target).
+ *   0. enforceGraphStructuralConstraints (single DEFINITION, one edge per answer outlet)
+ *   1. Walk the graph; if no path violates the constraint, return graph (possibly after step 0 only).
+ *   2. Enumerate simple paths from DEFINITION to leaves; dedupe identical traversals.
+ *   3. For each unique path, split into decisions + actions, rebuild def → decisions → actions.
+ *   4. DECISION nodes shared; ACTION clones deduped per identical action sequence on a path.
  *
- * The decision-port semantics are preserved: the answer port that originally led down a
- * path becomes the port that now leads to the next decision (or, for the last decision,
- * to the first action of the rewritten chain).
- *
- * Orphan nodes (unreachable from DEFINITION in the original graph) are preserved as-is.
- *
- * Returns { graph, changed, violations: [{from, to}], pathCount, cloneCount }.
+ * Returns { graph, changed, violations, pathCount, cloneCount, pathsDeduped, constraintNotes }.
  */
 function restructureDecisionsBeforeActions(graph) {
-  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
-  const edges = Array.isArray(graph?.edges) ? graph.edges : [];
+  let nodes = Array.isArray(graph?.nodes) ? graph.nodes : [];
+  let edges = Array.isArray(graph?.edges) ? graph.edges : [];
+  const enforced = enforceGraphStructuralConstraints(nodes, edges);
+  nodes = enforced.nodes;
+  edges = enforced.edges;
+  const constraintNotes = enforced.notes;
+
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const definition = nodes.find((n) => n.type === NodeType.DEFINITION);
-  if (!definition) return { graph, changed: false, violations: [], pathCount: 0, cloneCount: 0 };
+  if (!definition) {
+    return {
+      graph: { ...graph, nodes, edges },
+      changed: enforced.changed,
+      violations: [],
+      pathCount: 0,
+      cloneCount: 0,
+      pathsDeduped: 0,
+      constraintNotes,
+    };
+  }
 
   const isAction = (t) => t === NodeType.ACTION || t === NodeType.HANDLER;
   const isDecision = (t) => t === NodeType.DECISION;
 
-  // ── 1) Detect violations: any edge where the source has an ACTION/PEOPLE ancestor and the
-  //      target is a DECISION.
-  const violations = [];
-  {
-    const seenState = new Set();
-    const stack = [{ nodeId: definition.id, seenAction: false }];
-    while (stack.length) {
-      const { nodeId, seenAction } = stack.pop();
-      const stateKey = `${nodeId}|${seenAction ? '1' : '0'}`;
-      if (seenState.has(stateKey)) continue;
-      seenState.add(stateKey);
-      const node = byId.get(nodeId);
-      if (!node) continue;
-      const nextSeenAction = seenAction || isAction(node.type);
-      edges.filter((e) => e.sourceNodeId === nodeId).forEach((e) => {
-        const target = byId.get(e.targetNodeId);
-        if (!target) return;
-        if (nextSeenAction && isDecision(target.type)) {
-          violations.push({ from: nodeId, to: e.targetNodeId });
-        }
-        stack.push({ nodeId: e.targetNodeId, seenAction: nextSeenAction });
-      });
+  let violations = findActionToDecisionViolations(nodes, edges, definition.id);
+
+  // Drop edges that jump back to a DECISION after an ACTION ancestor (common AI/scaffold artifact).
+  if (violations.length > 0) {
+    const prunedEdges = edges.filter((e) => {
+      const key = edgeOutletKey(e.sourceNodeId, e.sourceAnswerId);
+      return !violations.some((v) => v.from === e.sourceNodeId && v.to === e.targetNodeId && v.edgeKey === key);
+    });
+    if (prunedEdges.length < edges.length) {
+      constraintNotes.push(`pruned_action_to_decision_edges:${edges.length - prunedEdges.length}`);
+      edges = prunedEdges;
+      violations = findActionToDecisionViolations(nodes, edges, definition.id);
     }
   }
+
   if (violations.length === 0) {
-    return { graph, changed: false, violations: [], pathCount: 0, cloneCount: 0 };
+    return {
+      graph: { ...graph, nodes, edges },
+      changed: enforced.changed || constraintNotes.length > 0,
+      violations: [],
+      pathCount: 0,
+      cloneCount: 0,
+      pathsDeduped: 0,
+      constraintNotes,
+    };
   }
 
   // ── 2) Enumerate simple paths from definition to every leaf (or to a cycle re-entry).
@@ -1900,6 +1998,20 @@ function restructureDecisionsBeforeActions(graph) {
   }
   dfs(definition.id, [], new Set());
 
+  const pathsBeforeDedupe = paths.length;
+  const sigSeen = new Set();
+  const uniquePaths = [];
+  for (const path of paths) {
+    const sig = pathTraversalSignature(path, byId);
+    if (sigSeen.has(sig)) continue;
+    sigSeen.add(sig);
+    uniquePaths.push(path);
+  }
+  const pathsDeduped = pathsBeforeDedupe - uniquePaths.length;
+  if (pathsDeduped > 0) {
+    console.warn(`[file2flow] restructure: dropped ${pathsDeduped} duplicate path(s) before cloning`);
+  }
+
   // ── 3) Rebuild each path: decisions in original order, then actions in original order.
   //      Decisions shared by id; actions cloned per path with deterministic suffix.
   const sharedDecisions = new Map(); // id -> node
@@ -1932,7 +2044,9 @@ function restructureDecisionsBeforeActions(graph) {
     return c;
   }
 
-  paths.forEach((path, pathIdx) => {
+  const actionCloneStepsBySeq = new Map();
+
+  uniquePaths.forEach((path, pathIdx) => {
     const decisions = [];
     const actions = [];
     for (const step of path) {
@@ -1949,13 +2063,18 @@ function restructureDecisionsBeforeActions(graph) {
       }
     });
 
-    const clonedActionSteps = actions.map((a, i) => {
-      const orig = byId.get(a.origNodeId);
-      const cloneId = `${orig.id}__p${pathIdx}_${i}`;
-      const clone = deepClone(orig, cloneId);
-      actionClones.push(clone);
-      return { nodeId: cloneId };
-    });
+    const actionSeqKey = actions.map((a) => a.origNodeId).join('|');
+    let clonedActionSteps = actionCloneStepsBySeq.get(actionSeqKey);
+    if (!clonedActionSteps) {
+      clonedActionSteps = actions.map((a, i) => {
+        const orig = byId.get(a.origNodeId);
+        const cloneId = `${orig.id}__p${actionCloneStepsBySeq.size}_${i}`;
+        const clone = deepClone(orig, cloneId);
+        actionClones.push(clone);
+        return { nodeId: cloneId };
+      });
+      actionCloneStepsBySeq.set(actionSeqKey, clonedActionSteps);
+    }
 
     const seq = [
       { nodeId: definition.id, type: NodeType.DEFINITION, portToNext: null },
@@ -1977,7 +2096,7 @@ function restructureDecisionsBeforeActions(graph) {
   // Mark every ORIGINAL action/people id that participated in any path — these are replaced
   // by clones, so they should NOT survive in the final graph.
   const replacedOrigIds = new Set();
-  paths.forEach((path) => {
+  uniquePaths.forEach((path) => {
     for (const step of path) {
       const n = byId.get(step.nodeId);
       if (n && isAction(n.type)) replacedOrigIds.add(step.nodeId);
@@ -1999,8 +2118,10 @@ function restructureDecisionsBeforeActions(graph) {
     graph: { ...graph, nodes: finalNodes, edges: finalEdges },
     changed: true,
     violations,
-    pathCount: paths.length,
+    pathCount: uniquePaths.length,
     cloneCount: actionClones.length,
+    pathsDeduped,
+    constraintNotes,
   };
 }
 
@@ -2208,8 +2329,11 @@ function validateFlow(flow) {
     }
     if (node.type === NodeType.DECISION) {
       for (const answer of node.answers || []) {
-        if (!edges.some((e) => e.sourceNodeId === node.id && e.sourceAnswerId === answer.id)) {
+        const outs = edges.filter((e) => e.sourceNodeId === node.id && e.sourceAnswerId === answer.id);
+        if (!outs.length) {
           errors.push(`${node.label} has a dead branch: ${answer.text}.`);
+        } else if (outs.length > 1) {
+          errors.push(`${node.label}: answer "${answer.text}" has ${outs.length} outgoing edges (max 1).`);
         }
       }
       if (/new decision|placeholder/i.test(node.label || node.content?.question || '')) {

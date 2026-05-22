@@ -196,6 +196,15 @@ sourceText = desc + fileText + ("--- Content from <url1> ---\n\n" + urlText1) + 
   - 缺 **ACTION** → 合成占位 `Action — to be defined`，优先接到某个 DECISION 中尚无 outgoing 的 answer 端口；都没有则直接挂在 DEFINITION 下。
   - 合成事件写入 `console.warn` 与 `step4_normalizedGraph.synthesizedNodeTypes`；UI 不报错，admin 进画布后可手动修正。
 
+### 3.6a 结构约束（`enforceGraphStructuralConstraints`，步骤 4 末尾 + 步骤 5 入口）
+
+在归一化后、重排前强制执行：
+
+- **仅一个 DEFINITION** 节点（多余的会删除并尽量把出边接到保留节点）。
+- **每个出口最多一条边**：按 `(sourceNodeId, sourceAnswerId)` 去重，保证每个 DECISION 选项只有一条出边；DEFINITION / ACTION 的 `sourceAnswerTempId: null` 出口同样最多一条。
+
+可避免 AI / scaffold 产生的平行重复边，否则步骤 5 的 DFS 会把同一条逻辑路径数出很多遍。
+
 ### 3.6b 步骤 5 — 微调顺序（`restructureDecisionsBeforeActions`）
 
 研究员端的体验是「先答完所有问题，再看到所有 action / contact」。这一步把图强制改成：
@@ -209,11 +218,13 @@ DEFINITION → DECISION* → (ACTION | PEOPLE)*
 **算法**（纯本地，无 LLM）：
 
 1. **检测违规**：DFS from DEFINITION，标记任何 `(ACTION ancestor) → DECISION` 的边。无违规直接返回原图（pass-through）。
-2. **枚举路径**：DFS 列出所有 DEFINITION → leaf 的简单路径，每步记录 `(nodeId, portToNext)`（decision 的 port = answer id）。
+2. **枚举路径**：DFS 列出 DEFINITION → leaf 的简单路径；**按遍历签名去重**，避免重复边导致的同一路径多次计数。
 3. **重写每条路径**：把路径拆成 `decisions[]`（保原顺序）+ `actions[]`（保原顺序），重组为 `def → decisions → actions`。
 4. **节点处理**：
    - **DECISION 共享**：每个 decision 在最终图里只出现一次（按 id 去重）；
-   - **ACTION / PEOPLE 克隆**：每条路径自带一份独立 clone（id 加 `__pX_Y` 后缀）。这样保证不同终端答案分别对应一条独立的 action 链，研究员遍历时不会跨答案混淆。
+   - **ACTION / PEOPLE 克隆**：仅当步骤 1 仍检测到 `ACTION→DECISION` 违规时运行；**相同 action 序列只克隆一份**（id 后缀 `__pN_i`）。若画布上出现大量 `__p0_0`、`__p1_0`… 同名链，即此步骤曾对过多「伪路径」逐条克隆——优先检查步骤 4 后是否有多余平行边。
+
+**冗余根因（常见）**：步骤 3/4 构图或 merge 后，同一 DECISION 选项或同一 ACTION 挂了多条出边 → 步骤 5 认为有十几条「不同路径」，把同一条 OSP/SAGE 链克隆十几次。约束去重 + 路径去重后，通常只剩 2–4 条真实分支。
 5. **边去重**：按 `(source, sourceAnswerId, target)` 去重；decision 间的边共享，clone 之间的边天然唯一。
 6. **孤立节点**：原图里不可达的节点原样保留。
 
@@ -241,7 +252,7 @@ DEFINITION → DECISION* → (ACTION | PEOPLE)*
 | `step3_*` | 构图 prompt / 原始输出 / 解析 / 修复日志 |
 | **`step0_smartUrlExploration`** | 智能 URL 探索 bundle：`skipped` / `reason` / `candidates[]` / `llmDecision { follow, skip, reasoning }` / `parseError` / `followed[]` / `fetchErrors[{url,error}]` / `appendedChars` / `augmentedSourceText` |
 | `step4_normalizedGraph` | 归一化后的图；含 `synthesizedNodeTypes: []`（被自动补出的节点类型，如 `["DEFINITION"]`） |
-| **`step5_restructure`** | 微调顺序步骤：`changed` / `violations[]` / `pathCount` / `cloneCount` / `graphAfter`（仅 changed 时含图） |
+| **`step5_restructure`** | 微调顺序：`changed` / `violations[]` / `pathCount` / `cloneCount` / `pathsDeduped` / `constraintNotes` / `graphAfter` |
 
 ### 3.8 环境变量
 
