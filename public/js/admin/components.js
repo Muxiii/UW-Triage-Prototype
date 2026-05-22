@@ -588,7 +588,7 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     if (!graph) return;
     const nextNodes = ensureDefinitionNode(graph.nodes || []);
     setNodes(nextNodes);
-    setEdges(graph.edges || []);
+    setEdges(sanitizeBuilderEdges(nextNodes, graph.edges || []));
     setSelected(null);
     setHistory({ past: [], future: [] });
     setPan(panForDefinition(nextNodes));
@@ -837,8 +837,9 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
   const startConn = (e, node, portId) => {
     if (readOnly) return;
     e.stopPropagation();
-    const p = getDomPortPos(node, portId);
-    setPendingConn({ fromNode: node.id, fromPort: portId, cursor: p });
+    const resolved = resolveBuilderFromPort(node, portId);
+    const p = getDomPortPos(node, resolved);
+    setPendingConn({ fromNode: node.id, fromPort: resolved, cursor: p });
     wrapRef.current.classList.add('connecting');
   };
 
@@ -846,11 +847,34 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     e.stopPropagation();
     if (!pendingConn) return;
     if (pendingConn.fromNode === toNode.id) { setPendingConn(null); wrapRef.current.classList.remove('connecting'); return; }
+    const fromNode = nodes.find((n) => n.id === pendingConn.fromNode);
+    if (!fromNode) return;
+    let fromPort = pendingConn.fromPort;
+    if (fromNode.type === 'decision') {
+      if (!fromNode.answers?.some((a) => a.id === fromPort)) {
+        setPendingConn(null);
+        wrapRef.current.classList.remove('connecting');
+        toast('Connect from a branch port on the decision node');
+        return;
+      }
+    } else if (isSingleOutletBuilderNode(fromNode)) {
+      fromPort = 'out';
+      if (edges.some((ed) => ed.from === fromNode.id)) {
+        setPendingConn(null);
+        wrapRef.current.classList.remove('connecting');
+        toast('Action nodes can have only one outgoing connection');
+        return;
+      }
+    } else {
+      fromPort = 'out';
+    }
     snapshot();
-    setEdges(es => {
-      const filtered = es.filter(e => !(e.from === pendingConn.fromNode && e.fromPort === pendingConn.fromPort));
-      return [...filtered, { id: 'e' + Date.now(), from: pendingConn.fromNode, fromPort: pendingConn.fromPort, to: toNode.id, toPort: toPortId }];
-    });
+    setEdges((es) =>
+      sanitizeBuilderEdges(nodes, [
+        ...es.filter((ed) => !(ed.from === fromNode.id && ed.fromPort === fromPort)),
+        { id: 'e' + Date.now(), from: fromNode.id, fromPort, to: toNode.id, toPort: toPortId || 'in' },
+      ])
+    );
     setPendingConn(null);
     wrapRef.current.classList.remove('connecting');
     toast('Connection created');
@@ -939,12 +963,15 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
   const edgeEls = edges.map(e => {
     const a = nodeMap[e.from], b = nodeMap[e.to];
     if (!a || !b) return null;
-    const p1 = getDomPortPos(a, e.fromPort), p2 = getDomPortPos(b, e.toPort);
+    const fromPort = resolveBuilderFromPort(a, e.fromPort);
+    if (a.type === 'decision' && !a.answers?.some((ans) => ans.id === fromPort)) return null;
+    const p1 = getDomPortPos(a, fromPort);
+    const p2 = getDomPortPos(b, e.toPort || 'in');
     const d = bezier(p1, p2);
     const isSel = selected?.type === 'edge' && selected.id === e.id;
     let label = '';
-    if (a.type === 'decision' && e.fromPort !== 'out') {
-      const idx = a.answers?.findIndex(ans => ans.id === e.fromPort);
+    if (a.type === 'decision') {
+      const idx = a.answers?.findIndex((ans) => ans.id === fromPort);
       if (idx >= 0) label = String(idx + 1);
     }
     const midX = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2;
@@ -975,7 +1002,7 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
           {pendingConn && (() => {
             const fn = nodeMap[pendingConn.fromNode];
             if (!fn) return null;
-            const p1 = getDomPortPos(fn, pendingConn.fromPort);
+            const p1 = getDomPortPos(fn, resolveBuilderFromPort(fn, pendingConn.fromPort));
             return <path className="edge-preview" d={bezier(p1, pendingConn.cursor)} />;
           })()}
         </svg>
