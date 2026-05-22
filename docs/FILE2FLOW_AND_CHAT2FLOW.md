@@ -30,7 +30,8 @@
 
 ```mermaid
 flowchart LR
-  A[前端 sourceText] --> B["01 转述 restatedText"]
+  S[前端 sourceText] --> A0["00 智能 URL 探索（一轮）"]
+  A0 --> B["01 转述 restatedText"]
   B --> B2["01b 建议流程标题"]
   B2 --> C["02 预处理 candidatePoints dossier"]
   C --> D["03 补全 predecessorId（可选）"]
@@ -42,7 +43,8 @@ flowchart LR
 
 | 步骤 | 提示词文件 / 函数 | `callAi` | 输入要点 |
 |------|-------------------|----------|----------|
-| 1. 转述 | `prompts/file2flow/01-source-restatement.md` | 是（可跳过） | 固定英文指令 + `---` + **原始** `sourceText` |
+| **0. 智能 URL 探索** | `prompts/file2flow/00-smart-url-exploration.md` + `smartExploreUrlsInSourceText()` | 是（仅当 sourceText 中含 URL 才调；可跳过） | 扫 sourceText 抓 http(s) URL（上限 8 个候选）→ LLM 决定哪些值得 follow（上限 3 个）→ 服务端 fetch 每个并 append；**只走一轮**，不递归。失败开（fail-open）：任何错误返回原 sourceText |
+| 1. 转述 | `prompts/file2flow/01-source-restatement.md` | 是（可跳过） | 固定英文指令 + `---` + 步骤 0 增强后的 `sourceText` |
 | 1b. 标题 | `prompts/file2flow/01b-flow-title-from-restatement.md` | 是（可跳过） | 转述全文 + 前端草稿 `name` / `sourceFile` → **简洁名**（含文书类型）；写入 `pipelineInput.name` 并覆盖最终 `flowName` 与 DEFINITION 节点 `label` |
 | 2. 预处理 | `prompts/file2flow/02-source-preprocess.md` | 是（可跳过） | **转述后**全文 `{{SOURCE_TEXT}}` → `candidatePoints`、分支 dossier 等 |
 | 3. 候选点补全 | `prompts/file2flow/03-complete-candidate-points.md` | 是（可跳过） | **原始**正文 + 转述文 + `candidatePoints` JSON；可新增点、补 `predecessorId` |
@@ -71,22 +73,27 @@ flowchart LR
 - **`.pdf`**：浏览器 **pdf.js**（`admin.html` 加载 3.11.x + worker）逐页 `getTextContent` 拼接；纯扫描件无文字层时需 OCR 或改粘贴正文。
 - **`.doc`（Word 97–2003）**：浏览器无法可靠解析，经 **`POST /api/extract-doc-text`**（JSON：`filename`、`base64`）由服务端 **`word-extractor`** 从缓冲区抽正文；体积上限约 **18 MB**。
 
-### 2.2b URL → 纯文本
+### 2.2b URL → 纯文本（支持多 URL）
 
 `extractUrlTextForAi(url)` → **`POST /api/extract-url-text`**（JSON：`url`）：
 
 - 仅 **http/https**；服务端 `fetch` 页面（超时约 20s，响应体上限约 2 MB）。
-- **HTML** 经去标签转为纯文本；**text/plain** 直接使用。
+- **HTML** 经 `htmlToPlainText(html, baseUrl)` 去标签转为纯文本。**`<a href>` 超链接被保留为 Markdown 式 `[label](resolved_url)`**，相对路径用 baseUrl 解析；`mailto:` / `javascript:` / `#fragment` 只保留 label 文字，丢弃 href。
+- **text/plain** 直接使用。
 - **PDF 直链**会报错，提示改走「上传文档」用 pdf.js 提取。
 - 需登录、强反爬或非 HTML 的页面可能失败，此时请粘贴正文。
 
+**UI**：`NewFlowModal` 与 `AiAssistantPanel` 都用共享的 `UrlListField` 组件 —— 默认 1 个空 URL 输入框，右上角 `+ Add URL` 可加更多，每行 `×` 移除。各 URL 串行 fetch，结果用 `--- Content from <url> ---` 头部分段拼进 sourceText。
+
 ### 2.3 合并规则
 
-`buildFile2flowSourceText({ desc, file, url })`：
+`buildFile2flowSourceText({ desc, file, urls: [] })`（也兼容旧的 `url: string`）：
 
 ```text
-sourceText = desc + fileText + ("--- Content from <url> ---\n\n" + urlText)
+sourceText = desc + fileText + ("--- Content from <url1> ---\n\n" + urlText1) + ("--- Content from <url2> ---\n\n" + urlText2) + ...
 ```
+
+去重：相同 URL 只 fetch 一次。空段跳过。
 
 （非空段用 `\n\n` 连接。）
 
@@ -103,6 +110,27 @@ sourceText = desc + fileText + ("--- Content from <url> ---\n\n" + urlText)
 **核心文件**：`server.mjs`（`restateSourceTextForFile2flow`、`analyzeSourceTextStructure`、`completeCandidatePointsWithLlm`、`buildGraphPrompt`、`normalizeAiGraph`、`validateFlow`）。
 
 **提示词目录**：`prompts/file2flow/`（每次请求读盘；`<!-- ... -->` 注释不会发给模型）。目录说明见 `prompts/file2flow/README.md`。
+
+### 3.0 步骤 0 — 智能 URL 探索（`smartExploreUrlsInSourceText`）
+
+**目的**：用户的源文档常常说「步骤详见 `https://...`」，但那个 URL 的内容并没有被前端 fetch（如果用户没在 URL 输入框里填它）。这一步让流水线**自动**判断要不要去 follow 这些"内嵌"URL，把内容拉进来。
+
+**算法**：
+1. 用 regex 扫 `sourceText`，提取所有 `https?://` URL，去重，截断到 **8 个**候选。
+2. 没找到任何 URL → 跳过，直接返回原文本。
+3. 调一次 LLM（`00-smart-url-exploration.md`），输入：
+   - `{{SOURCE_TEXT_PREVIEW}}`：前 8K 字的源文本（让 LLM 看到每个 URL 的上下文）
+   - `{{CANDIDATE_URLS_JSON}}`：候选 URL JSON 数组
+4. LLM 输出 `{ follow: [], skip: [], reasoning: "" }`。服务端只信 `follow` 里**严格匹配**候选列表的 URL，再截到 **3 个**。
+5. 对每个 follow URL 调 `fetchUrlAsText`（同 `/api/extract-url-text`，含链接保留），失败的 URL 静默记录到 `fetchErrors`。
+6. 把抓回的内容用 `--- Followed link <url> ---\n\n<text>` 头部分段拼到原 sourceText 末尾。
+7. **只走一轮**：抓回来的新内容不再被扫一遍 URL。
+
+**常量**：`FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES` (8), `FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW` (3), `FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS` (8000)。
+
+**失败开（fail-open）**：LLM 调用失败、JSON 解析失败、URL fetch 失败、网络超时 —— **任何**异常都返回原 sourceText 不阻塞主流程，错误细节落 `step0_smartUrlExploration` 调试字段。
+
+**跳过**：`AI_SKIP_SMART_URL_EXPLORATION=1`。
 
 ### 3.1 步骤 1 — 自然语言转述
 
@@ -211,6 +239,7 @@ DEFINITION → DECISION* → (ACTION | PEOPLE)*
 | **`step2d_candidatePointCompletion`** | 补全步骤 bundle（或 env 跳过 / 错误） |
 | `step2c_dossierStringInjectedIntoGraphPrompt` | 实际拼进构图 prompt 的 dossier |
 | `step3_*` | 构图 prompt / 原始输出 / 解析 / 修复日志 |
+| **`step0_smartUrlExploration`** | 智能 URL 探索 bundle：`skipped` / `reason` / `candidates[]` / `llmDecision { follow, skip, reasoning }` / `parseError` / `followed[]` / `fetchErrors[{url,error}]` / `appendedChars` / `augmentedSourceText` |
 | `step4_normalizedGraph` | 归一化后的图；含 `synthesizedNodeTypes: []`（被自动补出的节点类型，如 `["DEFINITION"]`） |
 | **`step5_restructure`** | 微调顺序步骤：`changed` / `violations[]` / `pathCount` / `cloneCount` / `graphAfter`（仅 changed 时含图） |
 
@@ -218,6 +247,7 @@ DEFINITION → DECISION* → (ACTION | PEOPLE)*
 
 | 变量 | 作用 |
 |------|------|
+| **`AI_SKIP_SMART_URL_EXPLORATION=1`** | 跳过步骤 0 智能 URL 探索 |
 | `AI_SKIP_SOURCE_RESTATEMENT=1` | 跳过转述 |
 | `AI_SKIP_FLOW_TITLE_FROM_RESTATEMENT=1` | 跳过 **01b** 标题 LLM |
 | `AI_SKIP_SOURCE_PREPROCESS=1` | 跳过预处理 LLM |

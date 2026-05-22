@@ -1510,7 +1510,62 @@ function InspectSettings({ selection, allNodes, flowDescription, setFlowDescript
   return null;
 }
 
-function AiSourceInputs({ url, setUrl, file, setFile, desc, setDesc, compact = false }) {
+/**
+ * One-or-more URL inputs with `+ Add URL` action. Used by both the New Flow
+ * modal and the AI Assistant panel. State is the parent's `urls: string[]`.
+ */
+function UrlListField({ urls, setUrls, placeholder = 'https://policy.uw.edu/…' }) {
+  const safe = Array.isArray(urls) && urls.length ? urls : [''];
+  const updateAt = (i, v) => setUrls(safe.map((u, j) => (j === i ? v : u)));
+  const removeAt = (i) => {
+    if (safe.length <= 1) setUrls(['']);
+    else setUrls(safe.filter((_, j) => j !== i));
+  };
+  const addRow = () => setUrls([...safe, '']);
+  const GlobeIc = () => (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a13 13 0 0 1 0 18M12 3a13 13 0 0 0 0 18"/>
+    </svg>
+  );
+  return (
+    <div className="nf-url-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {safe.map((u, i) => (
+        <div className="nf-url-wrap" key={i}>
+          <GlobeIc style={{ color: 'var(--ink-400)', flexShrink: 0 }} />
+          <input
+            className="nf-url-input"
+            placeholder={placeholder}
+            value={u}
+            onChange={(e) => updateAt(i, e.target.value)}
+          />
+          {(u || safe.length > 1) && (
+            <button
+              type="button"
+              style={{ color: 'var(--ink-400)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex' }}
+              onClick={() => removeAt(i)}
+              aria-label="Remove URL"
+            >
+              <Icon.X />
+            </button>
+          )}
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={addRow}
+        style={{
+          alignSelf: 'flex-start', background: 'none', border: 'none', cursor: 'pointer',
+          padding: '2px 0', color: 'var(--purple-700)', fontSize: 12, fontWeight: 500,
+          display: 'inline-flex', alignItems: 'center', gap: 4,
+        }}
+      >
+        <span style={{ fontSize: 14, lineHeight: 1 }}>+</span> Add URL
+      </button>
+    </div>
+  );
+}
+
+function AiSourceInputs({ urls, setUrls, file, setFile, desc, setDesc, compact = false }) {
   const [dragOver, setDragOver] = useState(false);
   const fileRef = React.useRef(null);
   const handleDrop = (e) => {
@@ -1540,14 +1595,7 @@ function AiSourceInputs({ url, setUrl, file, setFile, desc, setDesc, compact = f
     <div className={'ai-source-fields' + (compact ? ' ai-source-fields--compact' : '')}>
       <div>
         <div className="nf-field-label">Import from URL{optLabel}</div>
-        <div className="nf-url-wrap">
-          <GlobeIcon style={{ color: 'var(--ink-400)', flexShrink: 0 }} />
-          <input className="nf-url-input" placeholder="https://policy.uw.edu/…" value={url} onChange={(e) => setUrl(e.target.value)} />
-          {url ? (
-            <button type="button" style={{ color: 'var(--ink-400)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex' }}
-              onClick={() => setUrl('')} aria-label="Clear URL"><Icon.X /></button>
-          ) : null}
-        </div>
+        <UrlListField urls={urls} setUrls={setUrls} />
       </div>
       <div>
         <div className="nf-field-label">Upload a document{optLabel}</div>
@@ -1587,7 +1635,7 @@ function AiSourceInputs({ url, setUrl, file, setFile, desc, setDesc, compact = f
 }
 
 function AiAssistantPanel({ graph, flowTitle, onApplyAssistantOperations, onUndo, toast }) {
-  const [url, setUrl] = useState('');
+  const [urls, setUrls] = useState(['']);
   const [file, setFile] = useState(null);
   const [desc, setDesc] = useState('');
   const [busy, setBusy] = useState(false);
@@ -1595,7 +1643,8 @@ function AiAssistantPanel({ graph, flowTitle, onApplyAssistantOperations, onUndo
   const [plan, setPlan] = useState('');
   const [lastResult, setLastResult] = useState(null);
 
-  const buildSourceText = async () => buildFile2flowSourceText({ desc, file, url });
+  const buildSourceText = async () => buildFile2flowSourceText({ desc, file, urls });
+  const anyUrl = () => urls.some((u) => String(u || '').trim());
 
   const runAssistant = async () => {
     setBusy(true);
@@ -1604,14 +1653,14 @@ function AiAssistantPanel({ graph, flowTitle, onApplyAssistantOperations, onUndo
     setLastResult(null);
     try {
       const sourceText = await buildSourceText();
-      if (!sourceText && !url.trim()) throw new Error('Add instructions, upload a file, or paste text.');
+      if (!sourceText && !anyUrl()) throw new Error('Add instructions, upload a file, or paste text.');
       const ctx = graphToAssistantContext(graph);
       const res = await fetch(`${API_BASE}/assistant`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           sourceText: sourceText || 'Apply updates based on the linked source.',
-          sourceUrl: url.trim() || null,
+          sourceUrl: firstUrlFromList(urls),
           flowName: flowTitle || 'Current flow',
           graph: ctx,
         }),
@@ -1645,7 +1694,7 @@ function AiAssistantPanel({ graph, flowTitle, onApplyAssistantOperations, onUndo
 
   return (
     <div className="rp-assistant">
-      <AiSourceInputs url={url} setUrl={setUrl} file={file} setFile={setFile} desc={desc} setDesc={setDesc} compact />
+      <AiSourceInputs urls={urls} setUrls={setUrls} file={file} setFile={setFile} desc={desc} setDesc={setDesc} compact />
       {busy && (
         <div className="rp-assistant-status">
           <span className="nf-ai-spinner" style={{ width: 14, height: 14 }} />
@@ -1966,7 +2015,10 @@ function MiniFlowPreview({ nodes, edges, small = false }) {
   );
 }
 
+/** Pipeline step ids mirror the server's `emit(...)` calls in generateGraph
+    + the route-level validate event. Keep these in sync with server.mjs. */
 const FILE2FLOW_AI_PIPELINE_STEPS = [
+  { id: 'smart_explore', label: 'Smart URL exploration' },
   { id: 'restate', label: 'Restate signing workflow' },
   { id: 'nodes', label: 'Extract node candidates' },
   { id: 'complete', label: 'Complete predecessor links' },
@@ -1976,45 +2028,25 @@ const FILE2FLOW_AI_PIPELINE_STEPS = [
 ];
 
 function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
-  const [url, setUrl] = useState('');
+  const [urls, setUrls] = useState(['']);
   const [file, setFile] = useState(null);
   const [desc, setDesc] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
-  /** -1 = prep only; 0..4 = pipeline step index */
+  /** -1 = prep only; 0..N-1 = pipeline step index of the currently active step */
   const [aiPipelineIndex, setAiPipelineIndex] = useState(-1);
+  /** Per-step status: { [step.id]: 'active' | 'done' | 'skipped' }. Authoritative
+      for icon / label rendering; aiPipelineIndex only drives the progress bar fill. */
+  const [aiStepStates, setAiStepStates] = useState({});
   const [aiPrepMessage, setAiPrepMessage] = useState('');
   const fileRef = React.useRef(null);
-  const pipelineTimerRef = React.useRef(null);
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-  const clearPipelineTimer = () => {
-    if (pipelineTimerRef.current) {
-      clearInterval(pipelineTimerRef.current);
-      pipelineTimerRef.current = null;
-    }
-  };
 
   const setPrepStep = (msg) => {
     setAiPrepMessage(msg);
     setAiPipelineIndex(-1);
-  };
-
-  const setPipelineStep = (index) => {
-    setAiPrepMessage('');
-    setAiPipelineIndex(Math.max(0, Math.min(index, FILE2FLOW_AI_PIPELINE_STEPS.length - 1)));
-  };
-
-  const startPipelineProgressTimer = () => {
-    clearPipelineTimer();
-    setPipelineStep(0);
-    let idx = 0;
-    pipelineTimerRef.current = setInterval(() => {
-      idx = Math.min(idx + 1, FILE2FLOW_AI_PIPELINE_STEPS.length - 1);
-      setPipelineStep(idx);
-    }, 2800);
   };
 
   if (!open) return null;
@@ -2031,63 +2063,133 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
   };
 
   const startAnalysis = async () => {
-    const PREP_MS = 900;
+    const PREP_MS = 600;
 
     setAnalyzing(true);
     setAnalysisError('');
     setAiPrepMessage('');
     setAiPipelineIndex(-1);
-    clearPipelineTimer();
+    setAiStepStates({});
     try {
       setPrepStep('Detecting file type and input source…');
       await sleep(PREP_MS);
 
-      if (file && url.trim()) {
-        setPrepStep('Extracting text from document and URL…');
+      const filledUrls = urls.filter((u) => String(u || '').trim());
+      const urlCount = filledUrls.length;
+      if (file && urlCount > 0) {
+        setPrepStep(`Extracting text from document and ${urlCount} URL${urlCount > 1 ? 's' : ''}…`);
       } else if (file) {
         setPrepStep('Extracting text from document…');
-      } else if (url.trim()) {
-        setPrepStep('Fetching text from URL…');
+      } else if (urlCount > 0) {
+        setPrepStep(`Fetching text from ${urlCount} URL${urlCount > 1 ? 's' : ''}…`);
       } else {
         setPrepStep('Preparing materials (description, body text)…');
       }
 
-      const sourceText = await buildFile2flowSourceText({ desc, file, url });
-      await sleep(PREP_MS);
+      const sourceText = await buildFile2flowSourceText({ desc, file, urls });
       if (!sourceText) {
         throw new Error('Please upload a file, add a URL, add a description, or paste policy text (at least one).');
       }
 
-      startPipelineProgressTimer();
       const file2flowDebug =
         typeof window !== 'undefined' &&
         new URLSearchParams(window.location.search).get('file2flowDebug') === '1';
-      const res = await fetch(`${API_BASE}/flows`, {
+
+      // Streaming: server emits one NDJSON event per pipeline step boundary,
+      // ending with {type:'result'} or {type:'error'}. We never advance the
+      // progress UI on a fake timer.
+      const res = await fetch(`${API_BASE}/flows?stream=1`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', accept: 'application/x-ndjson' },
         body: JSON.stringify({
           name: desc.split('\n')[0]?.slice(0, 70) || file?.name?.replace(/\.[^.]+$/, '') || 'Generated Triage Flow',
-          sourceUrl: url || null,
+          sourceUrl: firstUrlFromList(urls),
           sourceFile: file?.name || null,
           sourceText,
           ...(file2flowDebug ? { debugFile2flow: true } : {}),
         }),
       });
-      clearPipelineTimer();
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'AI analysis failed');
-      if (!data.flow) throw new Error('AI analysis finished but no flow was returned');
-
-      setPipelineStep(FILE2FLOW_AI_PIPELINE_STEPS.length - 1);
-      setPrepStep('Applying workflow to canvas…');
-      await sleep(PREP_MS);
-
-      if (data.file2flowDebugPath) {
-        setPrepStep(`Debug snapshot written: ${data.file2flowDebugPath}`);
-        await sleep(1200);
+      if (!res.ok && !res.body) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `AI analysis failed (HTTP ${res.status})`);
       }
 
-      onGenerated?.(data.flow);
+      const idIndex = (stepId) => FILE2FLOW_AI_PIPELINE_STEPS.findIndex((s) => s.id === stepId);
+      let finalResult = null;
+      let streamedError = null;
+      const handleEvent = (evt) => {
+        if (evt?.type === 'step') {
+          const idx = idIndex(evt.id);
+          if (idx < 0) return;
+          if (evt.status === 'start') {
+            setAiPrepMessage('');
+            setAiPipelineIndex(idx);
+            setAiStepStates((prev) => ({ ...prev, [evt.id]: 'active' }));
+          } else if (evt.status === 'done' || evt.status === 'skipped') {
+            setAiStepStates((prev) => ({ ...prev, [evt.id]: evt.status }));
+            setAiPipelineIndex((curr) => Math.max(curr, idx + 1));
+          }
+        } else if (evt?.type === 'result') {
+          finalResult = evt;
+        } else if (evt?.type === 'error') {
+          streamedError = new Error(evt.message || 'AI analysis failed');
+        }
+      };
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop(); // last (possibly partial) line stays in buffer
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let evt;
+          try { evt = JSON.parse(line); } catch { continue; }
+          handleEvent(evt);
+        }
+      }
+      // flush any trailing line
+      if (buf.trim()) {
+        try { handleEvent(JSON.parse(buf)); } catch { /* ignore */ }
+      }
+
+      if (streamedError) throw streamedError;
+
+      // Legacy fallback: older servers (without streaming support) return a single
+      // {flow, issues} JSON body and ignore ?stream=1. Detect that shape and
+      // treat it as a synthetic result event so the new client still works.
+      if (!finalResult || !finalResult.flow) {
+        const fallbackText = (buf && buf.trim()) || null;
+        if (fallbackText) {
+          try {
+            const single = JSON.parse(fallbackText);
+            if (single && single.flow) {
+              finalResult = { type: 'result', ...single };
+            } else if (single && single.error) {
+              throw new Error(single.error);
+            }
+          } catch (_) { /* fall through to no-flow error */ }
+        }
+      }
+
+      if (!finalResult || !finalResult.flow) {
+        throw new Error('AI analysis finished but no flow was returned. (If you recently updated the server, restart `npm run dev` so the new streaming endpoint is loaded.)');
+      }
+
+      setAiPipelineIndex(FILE2FLOW_AI_PIPELINE_STEPS.length);
+      setPrepStep('Applying workflow to canvas…');
+      await sleep(300);
+
+      if (finalResult.file2flowDebugPath) {
+        setPrepStep(`Debug snapshot written: ${finalResult.file2flowDebugPath}`);
+        await sleep(900);
+      }
+
+      onGenerated?.(finalResult.flow);
       onClose();
     } catch (error) {
       const message = error.message || 'AI analysis failed';
@@ -2095,10 +2197,8 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
       setPrepStep('');
       setAiPipelineIndex(-1);
     } finally {
-      clearPipelineTimer();
       setAnalyzing(false);
       setAiPrepMessage('');
-      setAiPipelineIndex(-1);
     }
   };
 
@@ -2139,26 +2239,10 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
 
         {/* Body */}
         <div className="nf-body">
-          {/* URL input */}
+          {/* URL input(s) */}
           <div>
-            <div className="nf-field-label">Import from URL <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: 'var(--ink-400)' }}>— optional</span></div>
-            <div className="nf-url-wrap">
-              <GlobeIcon style={{ color: 'var(--ink-400)', flexShrink: 0 }} />
-              <input
-                className="nf-url-input"
-                placeholder="https://policy.uw.edu/agreement-guide…"
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-              />
-              {url && (
-                <button style={{ color: 'var(--ink-400)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex' }}
-                  onClick={() => setUrl('')}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                    <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-                  </svg>
-                </button>
-              )}
-            </div>
+            <div className="nf-field-label">Import from URL <span style={{ fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: 'var(--ink-400)' }}>— optional, multiple allowed</span></div>
+            <UrlListField urls={urls} setUrls={setUrls} placeholder="https://policy.uw.edu/agreement-guide…" />
           </div>
 
           {/* File drop zone */}
@@ -2236,9 +2320,11 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
               <ul className="nf-ai-steps" role="list">
                 {FILE2FLOW_AI_PIPELINE_STEPS.map((step, i) => {
                   const prePipeline = aiPipelineIndex < 0;
-                  const done = aiPipelineIndex >= 0 && i < aiPipelineIndex;
-                  const active = aiPipelineIndex >= 0 && i === aiPipelineIndex;
-                  const pending = aiPipelineIndex >= 0 && i > aiPipelineIndex;
+                  const state = aiStepStates[step.id]; // 'active' | 'done' | 'skipped' | undefined
+                  const active = state === 'active';
+                  const skipped = state === 'skipped';
+                  const done = state === 'done';
+                  const pending = !state && !prePipeline;
                   return (
                     <li
                       key={step.id}
@@ -2246,13 +2332,14 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
                         'nf-ai-step' +
                         (prePipeline ? ' nf-ai-step--upcoming' : '') +
                         (done ? ' nf-ai-step--done' : '') +
+                        (skipped ? ' nf-ai-step--done nf-ai-step--skipped' : '') +
                         (active ? ' nf-ai-step--active' : '') +
                         (pending ? ' nf-ai-step--pending' : '')
                       }
                     >
                       <div className="nf-ai-step-rail">
                         <span className="nf-ai-step-icon" aria-hidden>
-                          {done ? (
+                          {done || skipped ? (
                             <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
                               <path
                                 d="M2.5 6L5 8.5L9.5 3.5"
@@ -2271,13 +2358,16 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
                       </div>
                       <div className="nf-ai-step-text">
                         <span className="nf-ai-step-label">{step.label}</span>
-                        {!prePipeline && active ? (
+                        {active ? (
                           <span className="nf-ai-step-meta">In progress</span>
                         ) : null}
-                        {!prePipeline && done ? (
+                        {done ? (
                           <span className="nf-ai-step-meta nf-ai-step-meta--done">Done</span>
                         ) : null}
-                        {!prePipeline && pending ? (
+                        {skipped ? (
+                          <span className="nf-ai-step-meta nf-ai-step-meta--done">Skipped</span>
+                        ) : null}
+                        {pending ? (
                           <span className="nf-ai-step-meta nf-ai-step-meta--wait">Queued</span>
                         ) : null}
                       </div>

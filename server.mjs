@@ -965,6 +965,133 @@ function generateFallbackGraph({ name, sourceFile, sourceText }) {
 
 const FILE2FLOW_DEBUG_PATH = path.join(__dirname, 'data', 'file2flow-debug-last.json');
 
+const FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES = 8;
+const FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW = 3;
+const FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS = 8000;
+
+/**
+ * Step 0 — smart URL exploration (one round only, no recursion).
+ *
+ * Scans the merged source text for http(s) URLs, asks the LLM which (if any)
+ * are worth fetching for additional context, fetches the chosen ones, and
+ * returns the augmented source text. URLs already inlined by the client
+ * (e.g. `[label](url)` from htmlToPlainText) and bare URLs are both picked up.
+ *
+ * Returns:
+ *   {
+ *     skipped: boolean,
+ *     reason?: string,
+ *     candidates: string[],
+ *     prompt?: string,
+ *     rawAi?: string,
+ *     llmDecision?: { follow, skip, reasoning } | null,
+ *     parseError?: string,
+ *     followed: string[],
+ *     fetchErrors: { url, error }[],
+ *     appendedChars: number,
+ *     augmentedSourceText: string,
+ *   }
+ */
+async function smartExploreUrlsInSourceText(sourceText, config) {
+  const original = String(sourceText || '');
+  if (process.env.AI_SKIP_SMART_URL_EXPLORATION === '1') {
+    return {
+      skipped: true,
+      reason: 'AI_SKIP_SMART_URL_EXPLORATION=1',
+      candidates: [],
+      followed: [],
+      fetchErrors: [],
+      appendedChars: 0,
+      augmentedSourceText: original,
+    };
+  }
+
+  // Strip trailing punctuation that's commonly stuck to URLs in prose.
+  const URL_RE = /https?:\/\/[^\s)\]"'<>]+/gi;
+  const found = new Set();
+  let m;
+  while ((m = URL_RE.exec(original)) !== null) {
+    const u = m[0].replace(/[.,;:!?)\]]+$/, '');
+    if (u) found.add(u);
+  }
+  const candidates = [...found].slice(0, FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES);
+  if (candidates.length === 0) {
+    return {
+      skipped: true,
+      reason: 'no candidate URLs in source',
+      candidates: [],
+      followed: [],
+      fetchErrors: [],
+      appendedChars: 0,
+      augmentedSourceText: original,
+    };
+  }
+
+  // Ask the LLM which to follow.
+  const tpl = await loadFile2flowPrompt('00-smart-url-exploration.md');
+  const prompt = fillFile2flowPromptPlaceholders(tpl, {
+    SOURCE_TEXT_PREVIEW: original.slice(0, FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS),
+    CANDIDATE_URLS_JSON: JSON.stringify(candidates, null, 2),
+  });
+
+  let rawAi = null;
+  let llmDecision = null;
+  let parseError = null;
+  try {
+    rawAi = await callAi(prompt, config);
+    const jsonText = extractJsonCandidate(rawAi);
+    llmDecision = JSON.parse(jsonText);
+  } catch (e) {
+    parseError = String(e?.message || e);
+    console.warn('[smart-url-exploration] LLM call / parse failed:', parseError);
+  }
+
+  let toFollow = [];
+  if (llmDecision && Array.isArray(llmDecision.follow)) {
+    toFollow = llmDecision.follow
+      .map((u) => String(u || '').trim())
+      .filter((u) => candidates.includes(u))
+      .slice(0, FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW);
+    // De-dupe in case the model repeated entries.
+    toFollow = [...new Set(toFollow)];
+  }
+
+  const followed = [];
+  const fetchErrors = [];
+  const appendedSections = [];
+  for (const u of toFollow) {
+    try {
+      const r = await fetchUrlAsText(u);
+      const text = String(r.text || '').trim();
+      if (!text) {
+        fetchErrors.push({ url: u, error: 'page returned no extractable text' });
+        continue;
+      }
+      followed.push(u);
+      appendedSections.push(`--- Followed link ${u} ---\n\n${text}`);
+    } catch (e) {
+      fetchErrors.push({ url: u, error: String(e?.message || e) });
+    }
+  }
+
+  const augmented = appendedSections.length
+    ? `${original}\n\n${appendedSections.join('\n\n')}`
+    : original;
+
+  return {
+    skipped: false,
+    candidates,
+    prompt,
+    rawAi,
+    llmDecision: llmDecision || null,
+    parseError,
+    followed,
+    fetchErrors,
+    appendedChars: augmented.length - original.length,
+    augmentedSourceText: augmented,
+  };
+}
+
 /**
  * Pass 0: natural-language restatement of signing process (prompt file is fixed; source appended after).
  * @returns {{ restatedText: string, prompt: string, rawAi: string, skipped: boolean, reason?: string }}
@@ -1034,12 +1161,56 @@ async function suggestFlowTitleFromRestatement(restatedText, input, config) {
   return { title, prompt, rawAi };
 }
 
-async function generateGraph(input, debugFile2flow = false) {
-  const fullSource = String(input.sourceText || '');
+async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) {
+  const rawSource = String(input.sourceText || '');
   const config = requireAiConfig();
+  const emit = (id, status, meta) => {
+    try { onEvent({ type: 'step', id, status, ...(meta ? { meta } : {}) }); } catch { /* never let UI break a step */ }
+  };
 
+  // ── Step 0 — smart URL exploration (no recursion). One LLM call to decide
+  //    which URLs in the source text to fetch, then up to 3 fetches appended
+  //    to the source. Fails open: any error leaves the source untouched.
+  emit('smart_explore', 'start');
+  let smartExplore;
+  try {
+    smartExplore = await smartExploreUrlsInSourceText(rawSource, config);
+  } catch (e) {
+    console.warn('[file2flow] smart URL exploration failed:', e?.message || e);
+    smartExplore = {
+      skipped: true,
+      reason: `error: ${String(e?.message || e)}`,
+      candidates: [],
+      followed: [],
+      fetchErrors: [],
+      appendedChars: 0,
+      augmentedSourceText: rawSource,
+    };
+  }
+  if (!smartExplore.skipped && smartExplore.followed.length) {
+    console.log(
+      `[file2flow] smart-explore followed ${smartExplore.followed.length}/${smartExplore.candidates.length} candidate URL(s); appended ${smartExplore.appendedChars} chars`
+    );
+  }
+  if (smartExplore.skipped) {
+    emit('smart_explore', 'skipped', { reason: smartExplore.reason || null });
+  } else {
+    emit('smart_explore', 'done', {
+      candidates: smartExplore.candidates.length,
+      followed: smartExplore.followed.length,
+      appendedChars: smartExplore.appendedChars,
+    });
+  }
+  const fullSource = smartExplore.augmentedSourceText;
+
+  emit('restate', 'start');
   const restatement = await restateSourceTextForFile2flow(fullSource, config);
   const pipelineSource = restatement.restatedText;
+  if (restatement.skipped) {
+    emit('restate', 'skipped', { reason: restatement.reason || null });
+  } else {
+    emit('restate', 'done', { chars: pipelineSource.length });
+  }
 
   let suggestedFlowTitle = null;
   let flowTitleBundle = null;
@@ -1073,7 +1244,18 @@ async function generateGraph(input, debugFile2flow = false) {
           name: input.name ?? null,
           sourceFile: input.sourceFile ?? null,
           sourceUrl: input.sourceUrl ?? null,
-          sourceText: fullSource,
+          sourceText: rawSource,
+        },
+        step0_smartUrlExploration: {
+          skipped: smartExplore.skipped,
+          reason: smartExplore.reason ?? null,
+          candidates: smartExplore.candidates,
+          llmDecision: smartExplore.llmDecision,
+          parseError: smartExplore.parseError ?? null,
+          followed: smartExplore.followed,
+          fetchErrors: smartExplore.fetchErrors,
+          appendedChars: smartExplore.appendedChars,
+          augmentedSourceText: smartExplore.augmentedSourceText,
         },
         step1b_restatement: {
           skipped: restatement.skipped,
@@ -1097,8 +1279,11 @@ async function generateGraph(input, debugFile2flow = false) {
   let preprocessDossier = '';
   /** @type {{ candidatePoints?: object[], earlyForks?: object[] } | null} */
   let preprocessMergedParsed = null;
+  emit('nodes', 'start');
   if (process.env.AI_SKIP_SOURCE_PREPROCESS === '1') {
     if (snap) snap.step2_preprocess = { skippedByEnv: 'AI_SKIP_SOURCE_PREPROCESS=1' };
+    emit('nodes', 'skipped', { reason: 'AI_SKIP_SOURCE_PREPROCESS=1' });
+    emit('complete', 'skipped', { reason: 'preprocess skipped' });
     try {
       await writeFile2flowSegmentCandidates({
         generatedAt: now(),
@@ -1124,7 +1309,14 @@ async function generateGraph(input, debugFile2flow = false) {
     try {
       const bundle = await analyzeSourceTextStructure(pipelineInput, config);
       let mergedParsed = bundle?.parsed ?? null;
+      const candidatesCount = Array.isArray(mergedParsed?.candidatePoints) ? mergedParsed.candidatePoints.length : 0;
+      if (bundle?.skipped) {
+        emit('nodes', 'skipped', { reason: bundle.reason || 'preprocess skipped' });
+      } else {
+        emit('nodes', 'done', { candidatePoints: candidatesCount });
+      }
       let completionBundle = null;
+      emit('complete', 'start');
       if (
         mergedParsed &&
         Array.isArray(mergedParsed.candidatePoints) &&
@@ -1142,12 +1334,17 @@ async function generateGraph(input, debugFile2flow = false) {
           if (completionBundle?.parsed) {
             mergedParsed = mergePreprocessWithCandidateCompletion(mergedParsed, completionBundle.parsed);
           }
+          emit('complete', 'done', { candidatePoints: Array.isArray(mergedParsed?.candidatePoints) ? mergedParsed.candidatePoints.length : candidatesCount });
         } catch (completionErr) {
           console.warn('[candidate point completion]', completionErr?.message || completionErr);
           completionBundle = { error: String(completionErr?.message || completionErr) };
+          emit('complete', 'done', { error: String(completionErr?.message || completionErr) });
         }
       } else if (process.env.AI_SKIP_CANDIDATE_POINT_COMPLETION === '1') {
         completionBundle = { skippedByEnv: 'AI_SKIP_CANDIDATE_POINT_COMPLETION=1' };
+        emit('complete', 'skipped', { reason: 'AI_SKIP_CANDIDATE_POINT_COMPLETION=1' });
+      } else {
+        emit('complete', 'skipped', { reason: 'no candidate points to complete' });
       }
       preprocessDossier = formatPreprocessDossier(mergedParsed);
       preprocessMergedParsed = mergedParsed;
@@ -1199,6 +1396,8 @@ async function generateGraph(input, debugFile2flow = false) {
       }
     } catch (e) {
       console.warn('[source preprocess]', e?.message || e);
+      emit('nodes', 'done', { error: String(e?.message || e) });
+      emit('complete', 'skipped', { reason: 'preprocess errored' });
       if (snap) snap.step2_preprocess = { error: String(e?.message || e) };
       try {
         await writeFile2flowSegmentCandidates({
@@ -1225,6 +1424,7 @@ async function generateGraph(input, debugFile2flow = false) {
     }
   }
 
+  emit('graph', 'start');
   const graphPrompt = await buildGraphPrompt(pipelineInput, preprocessDossier);
   if (snap) snap.step3_graphPrompt = graphPrompt;
 
@@ -1324,10 +1524,16 @@ async function generateGraph(input, debugFile2flow = false) {
     };
     await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
   }
+  emit('graph', 'done', {
+    nodes: normalized.nodes.length,
+    edges: normalized.edges.length,
+    synthesized: normalized.synthesized || [],
+  });
 
   // ── Step 5: enforce researcher contract — decisions strictly before actions on every path.
   //    No LLM call; only runs when a violation is detected. If the original is already
   //    compliant, the graph passes through untouched.
+  emit('reorder', 'start');
   if (process.env.AI_SKIP_DECISION_REORDER !== '1') {
     const restructureResult = restructureDecisionsBeforeActions({
       flowName: normalized.flowName,
@@ -1356,9 +1562,18 @@ async function generateGraph(input, debugFile2flow = false) {
       };
       await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
     }
-  } else if (snap) {
-    snap.step5_restructure = { skipped: true, reason: 'AI_SKIP_DECISION_REORDER=1' };
-    await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
+    emit('reorder', 'done', {
+      changed: restructureResult.changed,
+      violations: restructureResult.violations.length,
+      pathCount: restructureResult.pathCount,
+      cloneCount: restructureResult.cloneCount,
+    });
+  } else {
+    if (snap) {
+      snap.step5_restructure = { skipped: true, reason: 'AI_SKIP_DECISION_REORDER=1' };
+      await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
+    }
+    emit('reorder', 'skipped', { reason: 'AI_SKIP_DECISION_REORDER=1' });
   }
 
   return normalized;
@@ -2210,12 +2425,40 @@ function normalizeUrlForFetch(raw) {
   return parsed.href;
 }
 
-function htmlToPlainText(html) {
+/**
+ * Strip HTML to plain text. Preserves `<a href>` hyperlinks as Markdown-style
+ * `[label](resolved_url)` so the downstream LLM keeps the link information at
+ * its original textual position (for smart URL exploration and graph context).
+ *
+ * @param html     raw HTML string
+ * @param baseUrl  page URL — used to resolve relative hrefs (optional)
+ */
+function htmlToPlainText(html, baseUrl = '') {
   let t = String(html || '');
   t = t.replace(/<script[\s\S]*?<\/script>/gi, ' ');
   t = t.replace(/<style[\s\S]*?<\/style>/gi, ' ');
   t = t.replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
   t = t.replace(/<!--[\s\S]*?-->/g, ' ');
+  // Convert <a href="X">label</a> → [label](resolved_url). Must run BEFORE
+  // the generic tag stripper. Skips mailto: / javascript: / fragment-only hrefs
+  // (those keep just the label text, no parenthetical).
+  t = t.replace(
+    /<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+    (_, href, inner) => {
+      const label = String(inner).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      const cleanHref = String(href || '').trim();
+      if (!cleanHref || /^(mailto:|javascript:|tel:|#)/i.test(cleanHref)) {
+        return label ? ` ${label} ` : ' ';
+      }
+      let resolved = cleanHref;
+      if (baseUrl) {
+        try { resolved = new URL(cleanHref, baseUrl).href; } catch { /* keep raw */ }
+      }
+      if (!label) return ` ${resolved} `;
+      if (label === resolved) return ` ${resolved} `;
+      return ` [${label}](${resolved}) `;
+    }
+  );
   t = t.replace(/<br\s*\/?>/gi, '\n');
   t = t.replace(/<\/(p|div|h[1-6]|li|tr|section|article)>/gi, '\n');
   t = t.replace(/<[^>]+>/g, ' ');
@@ -2267,7 +2510,7 @@ async function fetchUrlAsText(url) {
   const body = buf.toString('utf8');
   let text = '';
   if (ctype.includes('text/html') || /<html[\s>]/i.test(body) || /<body[\s>]/i.test(body)) {
-    text = htmlToPlainText(body);
+    text = htmlToPlainText(body, href);
   } else {
     text = body.replace(/\r\n/g, '\n').trim();
   }
@@ -2357,6 +2600,61 @@ async function handleApi(req, res, url) {
     const body = await readJson(req);
     const debugFile2flow = body.debugFile2flow === true;
     if (debugFile2flow) delete body.debugFile2flow;
+    // Clients that opt in to streaming get NDJSON events for each pipeline step
+    // followed by a final {type:'result'} (or {type:'error'}) event. Without the
+    // flag, behaviour is unchanged: one JSON response on completion.
+    const wantsStream = url.searchParams.get('stream') === '1';
+
+    if (wantsStream) {
+      res.writeHead(201, {
+        'content-type': 'application/x-ndjson; charset=utf-8',
+        'cache-control': 'no-cache',
+        'x-accel-buffering': 'no', // hint nginx/cloud proxies not to buffer
+      });
+      const writeEvent = (event) => {
+        try { res.write(`${JSON.stringify(event)}\n`); } catch { /* socket closed */ }
+      };
+      writeEvent({ type: 'start', ts: now() });
+      try {
+        const graph = await generateGraph(body, debugFile2flow, writeEvent);
+        const time = now();
+        const flow = {
+          id: id('flow'),
+          name: graph.flowName,
+          description: graph.description,
+          status: FlowStatus.DRAFT,
+          publishScope: null,
+          aiStatus: 'AI_READY',
+          aiError: null,
+          version: 1,
+          sourceUrl: body.sourceUrl || null,
+          sourceFile: body.sourceFile || null,
+          createdById: 'demo-admin',
+          nodes: graph.nodes,
+          edges: graph.edges,
+          createdAt: time,
+          updatedAt: time,
+        };
+        writeEvent({ type: 'step', id: 'validate', status: 'start' });
+        const issues = validateFlow(flow);
+        writeEvent({ type: 'step', id: 'validate', status: 'done', meta: { errors: issues.errors?.length || 0, warnings: issues.warnings?.length || 0 } });
+        db.flows.unshift(flow);
+        await writeDb(db);
+        const resultEvent = { type: 'result', flow, issues };
+        if (debugFile2flow) {
+          resultEvent.file2flowDebugPath = 'data/file2flow-debug-last.json';
+          resultEvent.file2flowDebugNote =
+            'Full prompts, raw LLM strings, extracted JSON candidates, and normalized graph are in that file (written on server disk).';
+        }
+        writeEvent(resultEvent);
+      } catch (error) {
+        writeEvent({ type: 'error', message: error?.message || 'Generation failed.' });
+      } finally {
+        res.end();
+      }
+      return;
+    }
+
     const graph = await generateGraph(body, debugFile2flow);
     const time = now();
     const flow = {
