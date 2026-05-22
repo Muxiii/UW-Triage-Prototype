@@ -43,7 +43,7 @@ flowchart LR
 
 | 步骤 | 提示词文件 / 函数 | `callAi` | 输入要点 |
 |------|-------------------|----------|----------|
-| **0. 智能 URL 探索** | `prompts/file2flow/00-smart-url-exploration.md` + `smartExploreUrlsInSourceText()` | 是（仅当 sourceText 中含 URL 才调；可跳过） | 扫 sourceText 抓 http(s) URL（上限 12 个候选）→ LLM 决定哪些值得 follow（上限 6 个）→ 服务端 fetch 每个并 append；**只走一轮**，不递归。失败开（fail-open）：任何错误返回原 sourceText |
+| **0. 智能 URL 探索** | `prompts/file2flow/00-smart-url-exploration.md` + `smartExploreUrlsInSourceText()` | 是（仅当 sourceText 中含 URL 才调；可跳过） | 扫 sourceText 抓 http(s) URL（上限 12 个候选，供 LLM 参考）→ LLM 输出 `follow` → 服务端**按 LLM 返回的 URL 直接 fetch**（上限 **10** 个）并 append；**只走一轮**，不递归。失败开（fail-open） |
 | 1. 转述 | `prompts/file2flow/01-source-restatement.md` | 是（可跳过） | 固定英文指令 + `---` + 步骤 0 增强后的 `sourceText` |
 | 1b. 标题 | `prompts/file2flow/01b-flow-title-from-restatement.md` | 是（可跳过） | 转述全文 + 前端草稿 `name` / `sourceFile` → **简洁名**（含文书类型）；写入 `pipelineInput.name` 并覆盖最终 `flowName` 与 DEFINITION 节点 `label` |
 | 2. 预处理 | `prompts/file2flow/02-source-preprocess.md` | 是（可跳过） | **转述后**全文 `{{SOURCE_TEXT}}` → `candidatePoints`、分支 dossier 等 |
@@ -121,12 +121,12 @@ sourceText = desc + fileText + ("--- Content from <url1> ---\n\n" + urlText1) + 
 3. 调一次 LLM（`00-smart-url-exploration.md`），输入：
    - `{{SOURCE_TEXT_PREVIEW}}`：前 8K 字的源文本（让 LLM 看到每个 URL 的上下文）
    - `{{CANDIDATE_URLS_JSON}}`：候选 URL JSON 数组
-4. LLM 输出 `{ follow: [], skip: [], reasoning: "" }`。服务端只信 `follow` 里**严格匹配**候选列表的 URL，再截到 **6 个**。
+4. LLM 输出 `{ follow: [], skip: [], reasoning: "" }`。服务端按 `follow` 中的 URL **原样抓取**（仅校验 http/https、去重），最多 **10** 个。
 5. 对每个 follow URL 调 `fetchUrlAsText`（同 `/api/extract-url-text`，含链接保留），失败的 URL 静默记录到 `fetchErrors`。
 6. 把抓回的内容用 `--- Followed link <url> ---\n\n<text>` 头部分段拼到原 sourceText 末尾。
 7. **只走一轮**：抓回来的新内容不再被扫一遍 URL。
 
-**常量**：`FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES` (12), `FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW` (6), `FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS` (8000)。
+**常量**：`FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES` (12), `FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW` (10), `FILE2FLOW_SMART_EXPLORE_SOURCE_PREVIEW_CHARS` (8000)。
 
 **失败开（fail-open）**：LLM 调用失败、JSON 解析失败、URL fetch 失败、网络超时 —— **任何**异常都返回原 sourceText 不阻塞主流程，错误细节落 `step0_smartUrlExploration` 调试字段。
 
@@ -250,7 +250,7 @@ DEFINITION → DECISION* → (ACTION | PEOPLE)*
 | **`step2d_candidatePointCompletion`** | 补全步骤 bundle（或 env 跳过 / 错误） |
 | `step2c_dossierStringInjectedIntoGraphPrompt` | 实际拼进构图 prompt 的 dossier |
 | `step3_*` | 构图 prompt / 原始输出 / 解析 / 修复日志 |
-| **`step0_smartUrlExploration`** | 智能 URL 探索 bundle：`skipped` / `reason` / `candidates[]` / `llmDecision { follow, skip, reasoning }` / `parseError` / `followed[]` / `fetchErrors[{url,error}]` / `appendedChars` / `augmentedSourceText` |
+| **`step0_smartUrlExploration`** | 智能 URL 探索 bundle：`skipped` / `reason` / `candidates[]` / `llmDecision` / `queuedFollow[]`（LLM follow，待抓取，≤10）/ `followed[]` / `fetchErrors` / `appendedChars` / `augmentedSourceText` |
 | `step4_normalizedGraph` | 归一化后的图；含 `synthesizedNodeTypes: []`（被自动补出的节点类型，如 `["DEFINITION"]`） |
 | **`step5_restructure`** | 微调顺序：`changed` / `violations[]` / `pathCount` / `cloneCount` / `pathsDeduped` / `constraintNotes` / `graphAfter` |
 

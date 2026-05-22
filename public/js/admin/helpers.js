@@ -834,9 +834,9 @@ function builderGraphToBackendFlow(currentFlow, nodes, edges) {
   };
 }
 
-/** One DECISION branch row: label (44px) + one-line rationale preview (18px), optional expanded rationale editor (+72px). */
+/** One DECISION branch row: label (52px, 2 lines) + rationale preview (18px), optional expanded rationale editor (+72px). */
 function decisionSegmentHeight(answer) {
-  const base = 62;
+  const base = 70;
   const extra = answer && answer.rationaleExpanded ? 72 : 0;
   return base + extra;
 }
@@ -846,7 +846,7 @@ function decisionPortLocalCenterY(node, idx) {
   const answers = node.answers || [];
   let y = 71;
   for (let k = 0; k < idx; k += 1) y += decisionSegmentHeight(answers[k]);
-  return y + 22;
+  return y + 26;
 }
 
 const nodeHeight = (node) => {

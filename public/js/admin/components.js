@@ -159,6 +159,61 @@ function AssigneeField({ node, onUpdate }) {
   );
 }
 
+/** Decision branch label: up to 2 lines when idle; taller textarea while editing. */
+function DecisionAnswerField({ value, readOnly, onChange }) {
+  const [editing, setEditing] = React.useState(false);
+  const taRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!editing || !taRef.current) return;
+    taRef.current.focus();
+    const len = taRef.current.value.length;
+    taRef.current.setSelectionRange(len, len);
+  }, [editing]);
+
+  if (readOnly) {
+    const text = (value || '').trim();
+    return (
+      <div className="answer-label-preview readonly" title={value || ''}>
+        {text || '—'}
+      </div>
+    );
+  }
+
+  if (!editing) {
+    const text = (value || '').trim();
+    return (
+      <div
+        className="answer-label-preview"
+        role="button"
+        tabIndex={0}
+        title={value || ''}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setEditing(true); }
+        }}
+      >
+        {text ? value : <span className="answer-label-placeholder">Answer label</span>}
+      </div>
+    );
+  }
+
+  return (
+    <textarea
+      ref={taRef}
+      className="answer-input answer-input-editing"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onBlur={() => setEditing(false)}
+      onPointerDown={(e) => e.stopPropagation()}
+      placeholder="Answer label"
+      rows={3}
+    />
+  );
+}
+
 function NodeView({ node, selected, onPointerDown, onUpdate, onDelete, onDuplicate, onStartConn, onFinishConn, onOpenMenu, hoverPort, setHoverPort, pendingConn, edges, readOnly, registerPort, onNodeMount }) {
   const isConnectedAsSource = (portId) => edges.some(e => e.from === node.id && e.fromPort === portId);
   const isConnectedAsTarget = (portId) => edges.some(e => e.to === node.id && e.toPort === portId);
@@ -326,7 +381,11 @@ function NodeView({ node, selected, onPointerDown, onUpdate, onDelete, onDuplica
               )}
               <div className="node-answer-main">
                 <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 9, fontWeight: 700, color: 'var(--purple-700)', background: 'var(--purple-100)', borderRadius: 3, padding: '1px 4px', flexShrink: 0, lineHeight: 1.4 }}>{i + 1}</span>
-                <textarea className="answer-input" readOnly={readOnly} value={a.label} onChange={(e) => onUpdate({ answers: node.answers.map(x => x.id === a.id ? { ...x, label: e.target.value } : x) })} onPointerDown={(e) => e.stopPropagation()} placeholder="Answer label" rows={1} />
+                <DecisionAnswerField
+                  value={a.label}
+                  readOnly={readOnly}
+                  onChange={(label) => onUpdate({ answers: node.answers.map(x => x.id === a.id ? { ...x, label } : x) })}
+                />
                 {!readOnly && <button className="answer-remove" type="button" onClick={() => onUpdate({ answers: node.answers.filter(x => x.id !== a.id) })}><Icon.X /></button>}
               </div>
               {!readOnly && (
@@ -1964,7 +2023,20 @@ function PublishModal({ open, onClose, issues, onPublish, isPublished, onUnpubli
 
 const FLOW_CARDS = [];
 
-function MiniFlowPreview({ nodes, edges, small = false }) {
+/** Max characters when preview text is large enough to read. */
+const MINI_FLOW_PREVIEW_LABEL_MAX = { grid: 18, small: 9 };
+/** Below this SVG font-size (px), show "..." instead of label text. */
+const MINI_FLOW_PREVIEW_MIN_READABLE_FS = 4;
+
+function truncateFlowPreviewLabel(text, maxChars) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s || maxChars < 1) return '';
+  if (s.length <= maxChars) return s;
+  return `${s.slice(0, Math.max(1, maxChars - 1))}…`;
+}
+
+function MiniFlowPreview({ nodes, edges, small = false, previewId = '' }) {
+  const clipPrefix = previewId ? `mini-flow-clip-${previewId}-` : 'mini-flow-clip-';
   if (!nodes || !nodes.length) {
     // Generic placeholder skeleton
     return (
@@ -2004,10 +2076,25 @@ function MiniFlowPreview({ nodes, edges, small = false }) {
     definition: { fill: 'oklch(0.95 0.04 200)',  stroke: 'oklch(0.52 0.12 200)' },
   };
 
+  const labelMaxBase = small ? MINI_FLOW_PREVIEW_LABEL_MAX.small : MINI_FLOW_PREVIEW_LABEL_MAX.grid;
+
   return (
     <svg width="100%" height="100%" viewBox={`0 0 ${svgW} ${svgH}`}
       preserveAspectRatio="xMidYMid meet"
       style={{ display: 'block', position: 'absolute', inset: 0 }}>
+      <defs>
+        {nodes.map(n => {
+          const x = tx(n.x), y = ty(n.y);
+          const h = n.type === 'decision' ? nH * 1.35 : nH;
+          const inset = small ? 1.5 : 3;
+          return (
+            <clipPath key={`clip-${n.id}`} id={`${clipPrefix}${n.id}`}>
+              <rect x={x + inset} y={y + inset} width={Math.max(0, nW - inset * 2)}
+                height={Math.max(0, h - inset * 2)} rx={small ? 1 : 2} />
+            </clipPath>
+          );
+        })}
+      </defs>
       {(edges || []).map(e => {
         const fn = nodes.find(n => n.id === e.from);
         const tn = nodes.find(n => n.id === e.to);
@@ -2022,16 +2109,31 @@ function MiniFlowPreview({ nodes, edges, small = false }) {
         const c = typeColor[n.type] || typeColor.action;
         const x = tx(n.x), y = ty(n.y);
         const h = n.type === 'decision' ? nH * 1.35 : nH;
-        const label = small ? '' : (n.title || n.name || '').slice(0, 22);
-        const fs = Math.max(5.5, nW * 0.073);
+        const rawLabel = String(n.title || n.name || n.label || '').trim();
+        const fs = Math.min(small ? 6 : 8, nW * 0.073);
+        const labelTooSmall = fs < MINI_FLOW_PREVIEW_MIN_READABLE_FS;
+        let label = '';
+        if (rawLabel) {
+          if (labelTooSmall) {
+            label = '...';
+          } else {
+            const maxChars = Math.min(
+              labelMaxBase,
+              Math.max(8, Math.floor((nW - 8) / (fs * 0.52)))
+            );
+            label = truncateFlowPreviewLabel(rawLabel, maxChars);
+          }
+        }
+        const labelFs = label === '...' ? Math.max(fs, small ? 5.5 : 6) : fs;
         return (
           <g key={n.id}>
             <rect x={x} y={y} width={nW} height={h} rx={small ? 1.5 : 3}
               fill={c.fill} stroke={c.stroke} strokeWidth={small ? 0.6 : 0.9} />
             {label && (
-              <text x={x + nW / 2} y={y + h / 2 + fs * 0.38}
-                textAnchor="middle" fontSize={fs} fill="oklch(0.35 0.01 280)"
-                fontFamily="Inter, sans-serif" style={{ userSelect: 'none' }}>
+              <text x={x + nW / 2} y={y + h / 2 + labelFs * 0.38}
+                textAnchor="middle" fontSize={labelFs} fill="oklch(0.35 0.01 280)"
+                fontFamily="Inter, sans-serif" style={{ userSelect: 'none' }}
+                clipPath={label === '...' ? undefined : `url(#${clipPrefix}${n.id})`}>
                 {label}
               </text>
             )}
@@ -2699,7 +2801,7 @@ function FlowLibrary({ onOpen, onScratch, toast, onGenerated, onMoveToTrash, onR
             {displayedFlows.map((f) => (
               <div key={f.id} className="flow-card" onClick={() => onOpen(f)} onContextMenu={(e) => openCardMenu(e, f)}>
                 <div className="flow-card-preview">
-                  <MiniFlowPreview nodes={f.nodes} edges={f.edges} />
+                  <MiniFlowPreview nodes={f.nodes} edges={f.edges} previewId={f.id} />
                 </div>
                 <div className="flow-card-body">
                   <div className="flow-card-name">{f.name}</div>
@@ -2727,7 +2829,7 @@ function FlowLibrary({ onOpen, onScratch, toast, onGenerated, onMoveToTrash, onR
             {displayedFlows.map(f => (
               <div key={f.id} className="flow-card-list" onClick={() => onOpen(f)} onContextMenu={(e) => openCardMenu(e, f)}>
                 <div className="flow-card-list-preview">
-                  <MiniFlowPreview nodes={f.nodes} edges={f.edges} small />
+                  <MiniFlowPreview nodes={f.nodes} edges={f.edges} small previewId={f.id} />
                 </div>
                 <div className="flow-card-list-body">
                   <div className="flow-card-list-name">{f.name}</div>
@@ -2845,7 +2947,7 @@ function TrashPage({ flows = [], onRestore, onPermanentlyDelete }) {
               }}
             >
               <div className="flow-card-list-preview">
-                <MiniFlowPreview nodes={f.nodes} edges={f.edges} small />
+                <MiniFlowPreview nodes={f.nodes} edges={f.edges} small previewId={f.id} />
               </div>
               <div className="flow-card-list-body">
                 <div className="flow-card-list-name">{f.name}</div>

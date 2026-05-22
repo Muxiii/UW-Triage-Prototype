@@ -11,8 +11,8 @@ Inputs (placeholders filled by server.mjs):
   {{CANDIDATE_URLS_JSON}} — JSON array of unique URLs already discovered in the text
                             (up to FILE2FLOW_SMART_EXPLORE_MAX_CANDIDATES).
 
-Output: ONE JSON object, no prose. The server caps `follow` at
-FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW (default 6).
+Output: ONE JSON object, no prose. The server fetches every URL in `follow`
+(as-is, up to FILE2FLOW_SMART_EXPLORE_MAX_FOLLOW, default 10).
 
 Notes for the model:
   - We will follow each chosen URL exactly once (no recursive expansion).
@@ -80,6 +80,6 @@ Return exactly **one** JSON object with these three fields, and nothing else:
 }
 ```
 
-The strings in `follow` and `skip` must be exact, character-for-character copies
-of URLs from the candidate list above. Do not invent new URLs. The maximum size
-of `follow` is **6** — if more would be useful, pick the 6 highest-value ones.
+Put full `https://…` URLs in `follow` (prefer URLs from the candidate list above).
+The server will fetch each URL you list, in order, up to **10** total.
+List lower-priority URLs under `skip` instead.
