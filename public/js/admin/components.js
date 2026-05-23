@@ -537,10 +537,24 @@ function ManagePeopleRow({ node, onUpdate, onDelete, isLast }) {
   );
 }
 
+function cloneBuilderNode(n, newId, dx, dy) {
+  const copy = { ...n, id: newId, x: n.x + dx, y: n.y + dy };
+  if (copy.answers) {
+    copy.answers = copy.answers.map((a) => ({
+      ...a,
+      id: 'a' + Math.random().toString(36).slice(2, 9),
+      rationaleExpanded: false,
+    }));
+  }
+  return copy;
+}
+
 function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, onNodesChange, onGraphChange, readOnly, graph }) {
   const [nodes, setNodes] = useState(ensureDefinitionNode(graph?.nodes || SEED_NODES));
   const [edges, setEdges] = useState(graph?.edges || SEED_EDGES);
-  const [selected, setSelected] = useState(null);
+  const [selectedNodeIds, setSelectedNodeIds] = useState([]);
+  const [selectedEdgeId, setSelectedEdgeId] = useState(null);
+  const clipboardRef = useRef(null);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState(() => panForDefinition(ensureDefinitionNode(graph?.nodes || SEED_NODES)));
   const [pendingConn, setPendingConn] = useState(null);
@@ -648,7 +662,8 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     const nextNodes = ensureDefinitionNode(graph.nodes || []);
     setNodes(nextNodes);
     setEdges(sanitizeBuilderEdges(nextNodes, graph.edges || []));
-    setSelected(null);
+    setSelectedNodeIds([]);
+    setSelectedEdgeId(null);
     setHistory({ past: [], future: [] });
     setPan(panForDefinition(nextNodes));
     setZoom(1);
@@ -743,13 +758,6 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
             return; // stop traversal on this invalid path
           }
 
-          if (node.type === 'action' && !seenDecision && !emitted.has(key('and'))) {
-            emitted.add(key('and'));
-            issues.push({ id: `iss-order-${node.id}-and`, level: 'err', nodeId: node.id,
-              title: 'Action without Decision gate',
-              body: `"${label}" — this ACTION node is reached with no DECISION node preceding it on this branch. Add a decision question upstream.` });
-          }
-
           if (node.type === 'handler' && !node.hiddenFromResearchers && !seenAction && !emitted.has(key('pba'))) {
             emitted.add(key('pba'));
             issues.push({ id: `iss-order-${node.id}-pba`, level: 'err', nodeId: node.id,
@@ -788,20 +796,23 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
   }, [nodes, edges, onIssuesChange]);
 
   useEffect(() => {
-    if (!selected) { onSelectionChange(null); return; }
-    if (selected.type === 'node') {
-      const n = nodes.find(x => x.id === selected.id);
-      onSelectionChange(n ? { type: 'node', data: n } : null);
-    } else {
-      onSelectionChange(selected);
+    if (selectedEdgeId) {
+      onSelectionChange({ type: 'edge', id: selectedEdgeId });
+      return;
     }
-  }, [selected, nodes, onSelectionChange]);
+    if (selectedNodeIds.length === 1) {
+      const n = nodes.find((x) => x.id === selectedNodeIds[0]);
+      onSelectionChange(n ? { type: 'node', data: n } : null);
+      return;
+    }
+    onSelectionChange(null);
+  }, [selectedNodeIds, selectedEdgeId, nodes, onSelectionChange]);
 
   const onWrapPointerDown = (e) => {
     if (!readOnly && (e.target.closest('.node') || e.target.closest('.port') || e.target.closest('.edge-hit'))) return;
     if (e.button !== 0 && e.button !== 1) return;
     if (pendingConn) return;
-    if (!readOnly) { setSelected(null); setCtxMenu(null); }
+    if (!readOnly) { setSelectedNodeIds([]); setSelectedEdgeId(null); setCtxMenu(null); }
     panRef.current = { active: true, sx: e.clientX, sy: e.clientY, px: pan.x, py: pan.y };
     wrapRef.current.classList.add('panning');
     e.preventDefault();
@@ -812,10 +823,16 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
       if (panRef.current.active) {
         setPan({ x: panRef.current.px + (e.clientX - panRef.current.sx), y: panRef.current.py + (e.clientY - panRef.current.sy) });
       }
-      if (dragRef.current) {
+      if (dragRef.current?.starts) {
         const dx = (e.clientX - dragRef.current.sx) / zoom;
         const dy = (e.clientY - dragRef.current.sy) / zoom;
-        setNodes(ns => ns.map(n => n.id === dragRef.current.id ? { ...n, x: dragRef.current.nx + dx, y: dragRef.current.ny + dy } : n));
+        setNodes((ns) =>
+          ns.map((n) => {
+            const start = dragRef.current.starts[n.id];
+            if (!start) return n;
+            return { ...n, x: start.x + dx, y: start.y + dy };
+          }),
+        );
       }
       if (pendingConn) {
         const r = wrapRef.current.getBoundingClientRect();
@@ -888,9 +905,30 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     if (node.type === 'definition') return;
     if (e.target.closest('.port') || e.target.closest('input') || e.target.closest('textarea') || e.target.closest('button.answer-remove') || e.target.closest('button.node-add-answer') || e.target.closest('.node-menu')) return;
     e.stopPropagation();
-    setSelected({ type: 'node', id: node.id });
-    dragRef.current = { id: node.id, sx: e.clientX, sy: e.clientY, nx: node.x, ny: node.y };
-    setHistory(h => ({ past: [...h.past.slice(-30), { nodes, edges }], future: [] }));
+    setSelectedEdgeId(null);
+
+    const extend = e.metaKey || e.ctrlKey || e.shiftKey;
+    if (extend) {
+      setSelectedNodeIds((prev) =>
+        prev.includes(node.id) ? prev.filter((id) => id !== node.id) : [...prev, node.id],
+      );
+      return;
+    }
+
+    const dragIds =
+      selectedNodeIds.includes(node.id) && selectedNodeIds.length > 1
+        ? selectedNodeIds.filter((id) => nodes.find((n) => n.id === id)?.type !== 'definition')
+        : [node.id];
+    if (!dragIds.includes(node.id)) dragIds.push(node.id);
+    setSelectedNodeIds(dragIds);
+
+    const starts = {};
+    dragIds.forEach((id) => {
+      const n = nodes.find((x) => x.id === id);
+      if (n) starts[id] = { x: n.x, y: n.y };
+    });
+    dragRef.current = { sx: e.clientX, sy: e.clientY, starts };
+    setHistory((h) => ({ past: [...h.past.slice(-30), { nodes, edges }], future: [] }));
   };
 
   const startConn = (e, node, portId) => {
@@ -939,36 +977,111 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     toast('Connection created');
   };
 
-  const deleteNode = useCallback((id) => {
-    const target = nodes.find(n => n.id === id);
-    if (target?.type === 'definition') return;
+  const deleteNodes = useCallback((ids) => {
+    const drop = new Set(
+      (Array.isArray(ids) ? ids : [ids]).filter((id) => {
+        const target = nodes.find((n) => n.id === id);
+        return target && target.type !== 'definition';
+      }),
+    );
+    if (!drop.size) return;
     snapshot();
-    setNodes(ns => ns.filter(n => n.id !== id));
-    setEdges(es => es.filter(e => e.from !== id && e.to !== id));
-    setSelected(null);
-    toast('Node deleted');
+    setNodes((ns) => ns.filter((n) => !drop.has(n.id)));
+    setEdges((es) => es.filter((e) => !drop.has(e.from) && !drop.has(e.to)));
+    setSelectedNodeIds((prev) => prev.filter((id) => !drop.has(id)));
+    toast(drop.size > 1 ? `${drop.size} nodes deleted` : 'Node deleted');
   }, [snapshot, toast, nodes]);
+
+  const deleteNode = useCallback((id) => deleteNodes([id]), [deleteNodes]);
 
   const deleteEdge = useCallback((id) => {
     snapshot();
-    setEdges(es => es.filter(e => e.id !== id));
-    setSelected(null);
+    setEdges((es) => es.filter((e) => e.id !== id));
+    setSelectedEdgeId(null);
   }, [snapshot]);
 
+  const copyNodesByIds = useCallback((ids) => {
+    const idSet = new Set(
+      (Array.isArray(ids) ? ids : [ids]).filter(
+        (id) => nodes.find((n) => n.id === id)?.type !== 'definition',
+      ),
+    );
+    if (!idSet.size) return;
+    const copiedNodes = nodes
+      .filter((n) => idSet.has(n.id))
+      .map((n) => JSON.parse(JSON.stringify(n)));
+    const copiedEdges = edges.filter((e) => idSet.has(e.from) && idSet.has(e.to));
+    clipboardRef.current = { nodes: copiedNodes, edges: copiedEdges };
+    toast(idSet.size > 1 ? `Copied ${idSet.size} nodes` : 'Node copied');
+  }, [nodes, edges, toast]);
+
+  const copySelectedNodes = useCallback(
+    () => copyNodesByIds(selectedNodeIds),
+    [copyNodesByIds, selectedNodeIds],
+  );
+
+  const pasteClipboardNodes = useCallback(() => {
+    const clip = clipboardRef.current;
+    if (!clip?.nodes?.length) {
+      toast('Nothing to paste — select nodes and press ⌘C first');
+      return;
+    }
+    snapshot();
+    const idMap = {};
+    let t = Date.now();
+    const PASTE_OFFSET = 40;
+    const newNodes = clip.nodes.map((n, i) => {
+      const newId = 'n' + (t + i);
+      idMap[n.id] = newId;
+      return cloneBuilderNode(n, newId, PASTE_OFFSET, PASTE_OFFSET);
+    });
+    const newEdges = (clip.edges || []).map((e, i) => ({
+      id: 'e' + (t + i + 1000),
+      from: idMap[e.from],
+      fromPort: e.fromPort,
+      to: idMap[e.to],
+      toPort: e.toPort || 'in',
+      locked: e.locked,
+    }));
+    const mergedNodes = [...nodes, ...newNodes];
+    setNodes(mergedNodes);
+    setEdges((es) => sanitizeBuilderEdges(mergedNodes, [...es, ...newEdges]));
+    setSelectedNodeIds(newNodes.map((n) => n.id));
+    setSelectedEdgeId(null);
+    toast(newNodes.length > 1 ? `Pasted ${newNodes.length} nodes` : 'Node pasted');
+  }, [nodes, edges, snapshot, toast]);
+
   useEffect(() => {
-    const onEsc = (e) => { if (e.key === 'Escape') { setPendingConn(null); setCtxMenu(null); wrapRef.current?.classList.remove('connecting'); } };
+    const typing = (el) => el && (el.matches('input,textarea,[contenteditable="true"]') || el.isContentEditable);
+    const onEsc = (e) => {
+      if (e.key === 'Escape') {
+        setPendingConn(null);
+        setCtxMenu(null);
+        setSelectedNodeIds([]);
+        setSelectedEdgeId(null);
+        wrapRef.current?.classList.remove('connecting');
+      }
+    };
     const onKey = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
-      else if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) { e.preventDefault(); redo(); }
-      else if ((e.key === 'Delete' || e.key === 'Backspace') && selected && !e.target.matches('input,textarea')) {
-        if (selected.type === 'node') deleteNode(selected.id);
-        else if (selected.type === 'edge') deleteEdge(selected.id);
+      if (typing(e.target)) return;
+      if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) { e.preventDefault(); redo(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'c') { e.preventDefault(); copySelectedNodes(); return; }
+      if ((e.metaKey || e.ctrlKey) && e.key === 'v') { e.preventDefault(); pasteClipboardNodes(); return; }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedNodeIds.length) {
+          e.preventDefault();
+          deleteNodes(selectedNodeIds);
+        } else if (selectedEdgeId) {
+          e.preventDefault();
+          deleteEdge(selectedEdgeId);
+        }
       }
     };
     window.addEventListener('keydown', onEsc);
     window.addEventListener('keydown', onKey);
     return () => { window.removeEventListener('keydown', onEsc); window.removeEventListener('keydown', onKey); };
-  }, [selected, undo, redo, deleteNode, deleteEdge]);
+  }, [selectedNodeIds, selectedEdgeId, undo, redo, deleteNodes, deleteEdge, copySelectedNodes, pasteClipboardNodes]);
 
   const updateNode = useCallback((id, patch) => setNodes(ns => ns.map(n => n.id === id ? { ...n, ...patch } : n)), []);
 
@@ -993,7 +1106,8 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     const w = wrapRef.current;
     setZoom(1);
     setPan({ x: w.clientWidth / 2 - (n.x + NODE_W / 2), y: w.clientHeight / 2 - (n.y + nodeHeight(n) / 2) });
-    setSelected({ type: 'node', id: nodeId });
+    setSelectedNodeIds([nodeId]);
+    setSelectedEdgeId(null);
   }, [nodes]);
 
   const applyAssistantOperations = useCallback((operations) => {
@@ -1027,7 +1141,7 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     const p1 = getDomPortPos(a, fromPort);
     const p2 = getDomPortPos(b, e.toPort || 'in');
     const d = bezier(p1, p2);
-    const isSel = selected?.type === 'edge' && selected.id === e.id;
+    const isSel = selectedEdgeId === e.id;
     let label = '';
     if (a.type === 'decision') {
       const idx = a.answers?.findIndex((ans) => ans.id === fromPort);
@@ -1036,7 +1150,7 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
     const midX = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2;
     return (
       <g key={e.id}>
-        <path className="edge-hit" d={d} onClick={(ev) => { if (readOnly) return; ev.stopPropagation(); setSelected({ type: 'edge', id: e.id }); }} />
+        <path className="edge-hit" d={d} onClick={(ev) => { if (readOnly) return; ev.stopPropagation(); setSelectedNodeIds([]); setSelectedEdgeId(e.id); }} />
         <path className={`edge-path ${isSel ? 'selected' : ''}`} d={d} markerEnd="url(#arrowhead)" />
         {label && (
           <g style={{ pointerEvents: 'none' }}>
@@ -1095,11 +1209,11 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
         {nodes.map(n => (
           <NodeView
             key={n.id} node={n}
-            selected={!readOnly && selected?.type === 'node' && selected.id === n.id}
+            selected={!readOnly && selectedNodeIds.includes(n.id)}
             onPointerDown={(e) => onNodePointerDown(e, n)}
             onUpdate={(patch) => updateNode(n.id, patch)}
             onDelete={() => deleteNode(n.id)}
-            onDuplicate={() => { snapshot(); const copy = { ...n, id: 'n' + Date.now(), x: n.x + 40, y: n.y + 40, answers: n.answers?.map(a => ({ ...a, id: 'a' + Math.random(), rationaleExpanded: false })) }; setNodes(ns => [...ns, copy]); toast('Node duplicated'); }}
+            onDuplicate={() => { snapshot(); const copy = cloneBuilderNode(n, 'n' + Date.now(), 40, 40); setNodes((ns) => [...ns, copy]); setSelectedNodeIds([copy.id]); setSelectedEdgeId(null); toast('Node duplicated'); }}
             onStartConn={startConn}
             onFinishConn={finishConn}
             onOpenMenu={(e, nodeId) => { if (readOnly) return; e.preventDefault(); e.stopPropagation(); setCtxMenu({ x: e.clientX, y: e.clientY, nodeId }); }}
@@ -1239,9 +1353,34 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
 
       {ctxMenu && nodes.find(x => x.id === ctxMenu.nodeId)?.type !== 'definition' && (
         <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }} onClick={(e) => e.stopPropagation()} onPointerDown={(e) => e.stopPropagation()}>
-          <div className="ctx-item" onClick={() => { const n = nodes.find(x => x.id === ctxMenu.nodeId); if (n) { snapshot(); const copy = { ...n, id: 'n' + Date.now(), x: n.x + 40, y: n.y + 40, answers: n.answers?.map(a => ({ ...a, id: 'a' + Math.random(), rationaleExpanded: false })) }; setNodes(ns => [...ns, copy]); } setCtxMenu(null); }}><Icon.Copy /> Duplicate <kbd>⌘D</kbd></div>
+          <div className="ctx-item" onClick={() => {
+            const n = nodes.find((x) => x.id === ctxMenu.nodeId);
+            if (n) {
+              snapshot();
+              const copy = cloneBuilderNode(n, 'n' + Date.now(), 40, 40);
+              setNodes((ns) => [...ns, copy]);
+              setSelectedNodeIds([copy.id]);
+              setSelectedEdgeId(null);
+            }
+            setCtxMenu(null);
+          }}><Icon.Copy /> Duplicate</div>
           <div className="ctx-divider" />
-          <div className="ctx-item danger" onClick={() => { deleteNode(ctxMenu.nodeId); setCtxMenu(null); }}><Icon.Trash /> Delete <kbd>⌫</kbd></div>
+          <div className="ctx-item" onClick={() => {
+            const ctxId = ctxMenu.nodeId;
+            const ids = selectedNodeIds.includes(ctxId) && selectedNodeIds.length > 1 ? selectedNodeIds : [ctxId];
+            copyNodesByIds(ids);
+            setSelectedNodeIds(ids);
+            setSelectedEdgeId(null);
+            setCtxMenu(null);
+          }}><Icon.Copy /> Copy <kbd>⌘C</kbd></div>
+          <div className="ctx-item" onClick={() => { pasteClipboardNodes(); setCtxMenu(null); }}><Icon.Copy /> Paste <kbd>⌘V</kbd></div>
+          <div className="ctx-divider" />
+          <div className="ctx-item danger" onClick={() => {
+            const ctxId = ctxMenu.nodeId;
+            const ids = selectedNodeIds.includes(ctxId) && selectedNodeIds.length > 1 ? selectedNodeIds : [ctxId];
+            deleteNodes(ids);
+            setCtxMenu(null);
+          }}><Icon.Trash /> Delete <kbd>⌫</kbd></div>
         </div>
       )}
     </div>

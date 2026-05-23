@@ -26,6 +26,8 @@ function App() {
   const sidebarResizeStart = useRef(null);
   const sidebarDragWidthRef = useRef(null);
   const toastTimerRef = useRef(null);
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState('');
 
   const TOAST_DEFAULT_MS = 3000;
 
@@ -47,6 +49,33 @@ function App() {
   }, []);
 
   const registerAdders = useCallback((a) => setAdders(a), []);
+  const openFlowCard = useCallback((f) => {
+    setActiveNav('builder');
+    setPreview(false);
+    if (f.backendFlow) {
+      scratchIdRef.current = null;
+      setActiveBackendFlow(f.backendFlow);
+      const graph = f.localDraft?.graph || backendFlowToBuilderGraph(f.backendFlow);
+      setActiveGraph(graph);
+      setCurrentGraph(graph);
+      setFlowDescription(f.localDraft?.description ?? f.backendFlow.description ?? '');
+    } else if (f.isLocal) {
+      scratchIdRef.current = f.id;
+      setActiveBackendFlow(null);
+      const graph = f.localDraft?.graph || { nodes: [], edges: [] };
+      setActiveGraph(graph);
+      setCurrentGraph(graph);
+      setFlowDescription(f.localDraft?.description || '');
+    } else {
+      scratchIdRef.current = null;
+      setActiveBackendFlow(null);
+      setActiveGraph(null);
+      setCurrentGraph({ nodes: [], edges: [] });
+      setFlowDescription('');
+    }
+    setFlowTitle(f.localDraft?.name || f.name);
+    setPage('canvas');
+  }, []);
   const handleIssues = useCallback((d) => setIssuesData(d), []);
   const handleSelection = useCallback((s) => setSelection(s), []);
   const handleFixIssue = useCallback((iss) => adders.fixIssue?.(iss), [adders]);
@@ -291,6 +320,31 @@ function App() {
     }
   }, [activeBackendFlow, flowToCard, pushToast]);
 
+  /** Keep library card preview (nodes/edges) in sync with the canvas graph. */
+  const syncFlowCardPreview = useCallback((flowId, graph) => {
+    if (!flowId || !graph?.nodes) return;
+    setGeneratedFlowCards((cards) =>
+      cards.map((card) => {
+        if (card.id !== flowId) return card;
+        const draft = card.localDraft || {};
+        return {
+          ...card,
+          nodes: graph.nodes,
+          edges: graph.edges || [],
+          localDraft: {
+            ...draft,
+            id: flowId,
+            name: draft.name ?? card.name,
+            description: draft.description ?? '',
+            graph,
+            isLocal: draft.isLocal ?? card.isLocal ?? !card.backendFlow,
+            savedAt: draft.savedAt,
+          },
+        };
+      }),
+    );
+  }, []);
+
   // ── Autosave ────────────────────────────────────────────────
   const activeFlowId = activeBackendFlow?.id || scratchIdRef.current;
   const isLocalFlow = !activeBackendFlow && !!scratchIdRef.current;
@@ -308,6 +362,12 @@ function App() {
     quota: 'Storage full — export your work',
   };
 
+  // Update library thumbnail whenever the open flow's graph changes on canvas.
+  useEffect(() => {
+    if (!activeFlowId || page !== 'canvas') return;
+    syncFlowCardPreview(activeFlowId, currentGraph);
+  }, [activeFlowId, currentGraph, page, syncFlowCardPreview]);
+
   // Bug 2 fix: reload card metadata from storage every time the library view mounts.
   // Works together with Bug 1: flushSave() on Back ensures the write lands before this read.
   useEffect(() => {
@@ -323,11 +383,15 @@ function App() {
         const timeStr = saved.savedAt
           ? new Date(saved.savedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
           : null;
+        const graph = saved.graph;
         return {
           ...card,
           name: saved.name || card.name,
           modified: timeStr ? `saved · ${timeStr}` : card.modified,
-          localDraft: saved,   // set for ALL cards so onOpen can restore AI-flow drafts too
+          localDraft: saved,
+          ...(graph?.nodes
+            ? { nodes: graph.nodes, edges: graph.edges || [] }
+            : {}),
         };
       }));
     }
@@ -399,6 +463,55 @@ function App() {
     document.body.style.cursor = '';
   }, []);
 
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault();
+        setGlobalSearchOpen((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const globalSearchResults = React.useMemo(() => {
+    const q = globalSearchQuery;
+    const entries = [];
+    const pushFlow = (f, badge, onSelect) => {
+      const nodeLabels = (f.nodes || []).map((n) => n.title || n.name || '').filter(Boolean);
+      const hay = buildSearchHaystack([
+        f.name,
+        f.backendFlow?.description,
+        f.localDraft?.description,
+        f.creator,
+        f.id,
+        ...nodeLabels,
+      ]);
+      if (!matchSearchQuery(hay, q)) return;
+      entries.push({
+        id: `${badge}-${f.id}`,
+        title: f.name || 'Untitled Flow',
+        subtitle: (f.backendFlow?.description || f.localDraft?.description || '').slice(0, 120),
+        badge,
+        onSelect: () => {
+          setGlobalSearchOpen(false);
+          onSelect();
+        },
+      });
+    };
+    generatedFlowCards.forEach((f) => {
+      pushFlow(f, f.status === 'published' ? 'Published' : 'Draft', () => openFlowCard(f));
+    });
+    trashedFlowCards.forEach((f) => {
+      pushFlow(f, 'Trash', () => {
+        setActiveNav('trash');
+        setPage('library');
+        pushToast(`「${f.name}」在回收站中，可在 Trash 页面恢复`);
+      });
+    });
+    return entries.slice(0, q.trim() ? 20 : 10);
+  }, [globalSearchQuery, generatedFlowCards, trashedFlowCards, openFlowCard, pushToast]);
+
   const BackIcon = () => (
     <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
       <path d="M9 2.5L4.5 7L9 11.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
@@ -415,7 +528,15 @@ function App() {
           <span className="brand-sub">Office of Research Admin</span>
         </div>
         <div className="topbar-right">
-          <div className="top-search"><Icon.Search /><span>Search flows, documents…</span><kbd>⌘K</kbd></div>
+          <button
+            type="button"
+            className="top-search"
+            onClick={() => setGlobalSearchOpen(true)}
+            title="Search flows (⌘K)"
+            aria-label="Search flows"
+          >
+            <Icon.Search /><span>Search flows…</span><kbd>⌘K</kbd>
+          </button>
           <button className="icon-btn" title="Notifications"><Icon.Bell /></button>
           <button className="icon-btn" title="Help"><Icon.Help /></button>
           <div className="avatar" title="Admin"></div>
@@ -438,32 +559,7 @@ function App() {
           <div className="nav-section-label">Recent Flows</div>
           <div className="nav-flows-list">
             {generatedFlowCards.slice(0, 4).map((f, i) => {
-              const openThis = () => {
-                setActiveNav('builder');
-                if (f.backendFlow) {
-                  scratchIdRef.current = null;
-                  setActiveBackendFlow(f.backendFlow);
-                  const graph = f.localDraft?.graph || backendFlowToBuilderGraph(f.backendFlow);
-                  setActiveGraph(graph);
-                  setCurrentGraph(graph);
-                  setFlowDescription(f.localDraft?.description ?? f.backendFlow.description ?? '');
-                } else if (f.isLocal) {
-                  scratchIdRef.current = f.id;
-                  setActiveBackendFlow(null);
-                  const graph = f.localDraft?.graph || { nodes: [], edges: [] };
-                  setActiveGraph(graph);
-                  setCurrentGraph(graph);
-                  setFlowDescription(f.localDraft?.description || '');
-                } else {
-                  scratchIdRef.current = null;
-                  setActiveBackendFlow(null);
-                  setActiveGraph(null);
-                  setCurrentGraph({ nodes: [], edges: [] });
-                  setFlowDescription('');
-                }
-                setFlowTitle(f.localDraft?.name || f.name);
-                setPage('canvas');
-              };
+              const openThis = () => openFlowCard(f);
               return (
               <div key={f.id || i} className="nav-item nav-flow-item" data-tooltip={f.name}
                 title={sidebarCollapsed ? f.name : ''} role="button" tabIndex={0}
@@ -498,31 +594,7 @@ function App() {
         {activeNav === 'builder' && page === 'library' && (
           <FlowLibrary
             flows={generatedFlowCards}
-            onOpen={(f) => {
-              if (f.backendFlow) {
-                scratchIdRef.current = null;
-                setActiveBackendFlow(f.backendFlow);
-                const graph = f.localDraft?.graph || backendFlowToBuilderGraph(f.backendFlow);
-                setActiveGraph(graph);
-                setCurrentGraph(graph);
-                setFlowDescription(f.localDraft?.description ?? f.backendFlow.description ?? '');
-              } else if (f.isLocal) {
-                scratchIdRef.current = f.id;
-                setActiveBackendFlow(null);
-                const graph = f.localDraft?.graph || { nodes: [], edges: [] };
-                setActiveGraph(graph);
-                setCurrentGraph(graph);
-                setFlowDescription(f.localDraft?.description || '');
-              } else {
-                scratchIdRef.current = null;
-                setActiveBackendFlow(null);
-                setActiveGraph(null);
-                setCurrentGraph({ nodes: [], edges: [] });
-                setFlowDescription('');
-              }
-              setFlowTitle(f.localDraft?.name || f.name);
-              setPage('canvas');
-            }}
+            onOpen={openFlowCard}
             onScratch={() => {
               const scratchId = 'local_' + Date.now();
               scratchIdRef.current = scratchId;
@@ -645,6 +717,17 @@ function App() {
         danger
         onConfirm={() => executePermanentDelete(permDeleteConfirmCard)}
         onClose={() => setPermDeleteConfirmCard(null)}
+      />
+
+      <GlobalSearchPalette
+        open={globalSearchOpen}
+        onClose={() => setGlobalSearchOpen(false)}
+        query={globalSearchQuery}
+        setQuery={setGlobalSearchQuery}
+        results={globalSearchResults}
+        placeholder="Search flows by name, description, or node title…"
+        emptyLabel="No matching flows"
+        hintLabel="Recent flows — type to filter"
       />
 
       {/* Toasts */}

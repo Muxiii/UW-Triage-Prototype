@@ -1,7 +1,13 @@
-function KnowledgeBase({ mode, publicDocs }) {
+function KnowledgeBase({ mode, publicDocs, openDocId, onOpenDocHandled }) {
   const [docId, setDocId] = useState(null);
 
   useEffect(() => { setDocId(null); }, [mode]);
+
+  useEffect(() => {
+    if (!openDocId) return;
+    setDocId(openDocId);
+    onOpenDocHandled?.();
+  }, [openDocId, onOpenDocHandled]);
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden", background: "var(--canvas-bg)" }}>
@@ -28,6 +34,9 @@ function Portal() {
   const [kbMode, setKbMode] = useState("documents");
   const [publicDocs, setPublicDocs] = useState([]);
   const [showNewRequestModal, setShowNewRequestModal] = useState(false);
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [globalSearchQuery, setGlobalSearchQuery] = useState("");
+  const [openDocId, setOpenDocId] = useState(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarDragging, setSidebarDragging] = useState(false);
   const [sidebarDragWidth, setSidebarDragWidth] = useState(null);
@@ -112,13 +121,54 @@ function Portal() {
     document.body.style.cursor = "";
   }, []);
 
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setGlobalSearchOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const globalSearchResults = React.useMemo(() => {
+    const q = globalSearchQuery;
+    return publicDocs
+      .map((d) => {
+        const hay = buildSearchHaystack([d.name, d.abbrev, d.summary, d.definition, ...(d.offices || [])]);
+        if (!matchSearchQuery(hay, q)) return null;
+        return {
+          id: d.id,
+          title: d.name,
+          subtitle: (d.summary || d.definition || "").slice(0, 120),
+          badge: d.abbrev,
+          onSelect: () => {
+            setGlobalSearchOpen(false);
+            setActive("Agreement Guide");
+            setKbMode("documents");
+            setOpenDocId(d.id);
+          },
+        };
+      })
+      .filter(Boolean)
+      .slice(0, q.trim() ? 20 : 8);
+  }, [globalSearchQuery, publicDocs]);
+
   return (
     <React.Fragment>
       <div className="portal-shell" style={{ "--sidebar-w": `${sidebarWidth}px` }}>
-        <TopBar />
+        <TopBar onOpenSearch={() => setGlobalSearchOpen(true)} />
         <LeftSidebar active={active} setActive={handleSetActive} collapsed={sidebarCollapsed} dragging={sidebarDragging} onResizeStart={handleSidebarResizeStart} onNewRequest={() => setShowNewRequestModal(true)} />
         <div style={{ gridArea: "main", display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-          {active === "Agreement Guide" && <KnowledgeBase mode={kbMode} publicDocs={publicDocs} />}
+          {active === "Agreement Guide" && (
+            <KnowledgeBase
+              mode={kbMode}
+              publicDocs={publicDocs}
+              openDocId={openDocId}
+              onOpenDocHandled={() => setOpenDocId(null)}
+            />
+          )}
           {active === "My requests" && <MyRequestsView docs={publicDocs} />}
           {active === "Messages" && <StubTab name="Messages" blurb="Threaded conversations with the offices handling your requests. Out of scope for this prototype." />}
         </div>
@@ -126,6 +176,16 @@ function Portal() {
       {showNewRequestModal && (
         <MyRequestsSigningModal docs={publicDocs} onClose={() => setShowNewRequestModal(false)} />
       )}
+      <GlobalSearchPalette
+        open={globalSearchOpen}
+        onClose={() => setGlobalSearchOpen(false)}
+        query={globalSearchQuery}
+        setQuery={setGlobalSearchQuery}
+        results={globalSearchResults}
+        placeholder="Search agreement types…"
+        emptyLabel="No matching documents"
+        hintLabel="Published agreement guides — type to filter"
+      />
     </React.Fragment>
   );
 }

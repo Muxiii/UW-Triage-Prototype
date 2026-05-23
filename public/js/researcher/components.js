@@ -1780,7 +1780,7 @@ const NavIcon = {
   ),
 };
 
-function TopBar() {
+function TopBar({ onOpenSearch }) {
   return (
     <div style={{
       gridArea: "topbar",
@@ -1802,11 +1802,31 @@ function TopBar() {
       {/* Right: search + bell + avatar */}
       <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
         {/* Search */}
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--ink-100)", border: "1px solid var(--ink-200)", padding: "6px 12px", borderRadius: 6, fontSize: 12.5, color: "var(--ink-500)", width: 240, cursor: "text" }}>
-          <svg width="13" height="13" viewBox="0 0 13 13" fill="none"><circle cx="5.5" cy="5.5" r="4" stroke="currentColor" strokeWidth="1.3"/><path d="M9 9L11.5 11.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
-          <span style={{ flex: 1 }}>Search…</span>
+        <button
+          type="button"
+          className="top-search"
+          onClick={() => onOpenSearch?.()}
+          title="Search agreement guides (⌘K)"
+          aria-label="Search agreement guides"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            background: "var(--ink-100)",
+            border: "1px solid var(--ink-200)",
+            padding: "6px 12px",
+            borderRadius: 6,
+            fontSize: 12.5,
+            color: "var(--ink-500)",
+            width: 240,
+            cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+        >
+          <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden><circle cx="5.5" cy="5.5" r="4" stroke="currentColor" strokeWidth="1.3"/><path d="M9 9L11.5 11.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/></svg>
+          <span style={{ flex: 1, textAlign: "left" }}>Search guides…</span>
           <kbd style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5, background: "white", border: "1px solid var(--ink-300)", padding: "1px 5px", borderRadius: 3, color: "var(--ink-500)" }}>⌘K</kbd>
-        </div>
+        </button>
         {/* Notification bell */}
         <button style={{ width: 30, height: 30, borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--ink-700)", background: "none", border: "none", cursor: "pointer", transition: "background 120ms" }}
           onMouseEnter={(e) => e.currentTarget.style.background = "var(--ink-100)"}
