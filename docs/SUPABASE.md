@@ -60,14 +60,15 @@ npm run db:migrate
 
 **Vercel 不要跑 `server.mjs`。** API 只在 Render 上运行；Supabase 变量配在 **Render**，不是 Vercel。若 Vercel Logs 出现 `/var/task` 或 `getStore` 报错，说明误把后端部署到了 Vercel——检查项目 **不要** 设置 Start Command / `npm start`，并确保仓库含 `.vercelignore`。
 
-1. **不要**把 Root Directory 设成 `public`；用仓库根目录，由根目录 `vercel.json` 负责构建并输出 `public/`。
-2. **Settings → Environment Variables** 添加（与 Vite 项目相同）：
+1. **Root Directory 必须留空**（仓库根目录）。若设成 `public`，会变成 `public/public` 输出，整站 **404**。
+2. 首页 `/` 会跳转到 `/admin.html`；也可直接访问 `/admin.html`、`/researcher.html`。
+3. **Settings → Environment Variables** 添加（与 Vite 项目相同）：
 
    `VITE_API_BASE` = `https://your-api.onrender.com/api`
 
    部署时会运行 `npm run vercel:build`，把该值写入 `public/js/runtime-config.js`。
 
-3. 确保 Render API 已开启 CORS（服务端已设置 `Access-Control-Allow-Origin: *`）。
+4. 确保 Render API 已开启 CORS（服务端已设置 `Access-Control-Allow-Origin: *`）。
 
 ### 同域部署
 

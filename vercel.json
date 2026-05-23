@@ -2,5 +2,9 @@
   "buildCommand": "npm run vercel:build",
   "outputDirectory": "public",
   "installCommand": "npm install",
-  "framework": null
+  "framework": null,
+  "rewrites": [
+    { "source": "/admin", "destination": "/admin.html" },
+    { "source": "/researcher", "destination": "/researcher.html" }
+  ]
 }
