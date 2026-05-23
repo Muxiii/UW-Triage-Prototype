@@ -291,6 +291,31 @@ function App() {
     }
   }, [activeBackendFlow, flowToCard, pushToast]);
 
+  /** Keep library card preview (nodes/edges) in sync with the canvas graph. */
+  const syncFlowCardPreview = useCallback((flowId, graph) => {
+    if (!flowId || !graph?.nodes) return;
+    setGeneratedFlowCards((cards) =>
+      cards.map((card) => {
+        if (card.id !== flowId) return card;
+        const draft = card.localDraft || {};
+        return {
+          ...card,
+          nodes: graph.nodes,
+          edges: graph.edges || [],
+          localDraft: {
+            ...draft,
+            id: flowId,
+            name: draft.name ?? card.name,
+            description: draft.description ?? '',
+            graph,
+            isLocal: draft.isLocal ?? card.isLocal ?? !card.backendFlow,
+            savedAt: draft.savedAt,
+          },
+        };
+      }),
+    );
+  }, []);
+
   // ── Autosave ────────────────────────────────────────────────
   const activeFlowId = activeBackendFlow?.id || scratchIdRef.current;
   const isLocalFlow = !activeBackendFlow && !!scratchIdRef.current;
@@ -308,6 +333,12 @@ function App() {
     quota: 'Storage full — export your work',
   };
 
+  // Update library thumbnail whenever the open flow's graph changes on canvas.
+  useEffect(() => {
+    if (!activeFlowId || page !== 'canvas') return;
+    syncFlowCardPreview(activeFlowId, currentGraph);
+  }, [activeFlowId, currentGraph, page, syncFlowCardPreview]);
+
   // Bug 2 fix: reload card metadata from storage every time the library view mounts.
   // Works together with Bug 1: flushSave() on Back ensures the write lands before this read.
   useEffect(() => {
@@ -323,11 +354,15 @@ function App() {
         const timeStr = saved.savedAt
           ? new Date(saved.savedAt).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
           : null;
+        const graph = saved.graph;
         return {
           ...card,
           name: saved.name || card.name,
           modified: timeStr ? `saved · ${timeStr}` : card.modified,
-          localDraft: saved,   // set for ALL cards so onOpen can restore AI-flow drafts too
+          localDraft: saved,
+          ...(graph?.nodes
+            ? { nodes: graph.nodes, edges: graph.edges || [] }
+            : {}),
         };
       }));
     }
