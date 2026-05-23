@@ -758,13 +758,6 @@ function FlowCanvas({ onSelectionChange, onIssuesChange, toast, registerAdders, 
             return; // stop traversal on this invalid path
           }
 
-          if (node.type === 'action' && !seenDecision && !emitted.has(key('and'))) {
-            emitted.add(key('and'));
-            issues.push({ id: `iss-order-${node.id}-and`, level: 'err', nodeId: node.id,
-              title: 'Action without Decision gate',
-              body: `"${label}" — this ACTION node is reached with no DECISION node preceding it on this branch. Add a decision question upstream.` });
-          }
-
           if (node.type === 'handler' && !node.hiddenFromResearchers && !seenAction && !emitted.has(key('pba'))) {
             emitted.add(key('pba'));
             issues.push({ id: `iss-order-${node.id}-pba`, level: 'err', nodeId: node.id,

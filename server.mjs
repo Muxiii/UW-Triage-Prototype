@@ -1553,13 +1553,16 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
   //    compliant, the graph passes through untouched.
   emit('reorder', 'start');
   if (process.env.AI_SKIP_DECISION_REORDER !== '1') {
-    const restructureResult = restructureDecisionsBeforeActions({
+    const preEnforced = enforceGraphStructuralConstraints(normalized.nodes, normalized.edges);
+    const integrateResult = integrateFloatingDecisionsIntoFlow({
       flowName: normalized.flowName,
       description: normalized.description,
-      nodes: normalized.nodes,
-      edges: normalized.edges,
+      nodes: preEnforced.nodes,
+      edges: preEnforced.edges,
     });
-    if (restructureResult.changed) {
+    const graphBeforeRestructure = integrateResult.graph;
+    const restructureResult = restructureDecisionsBeforeActions(graphBeforeRestructure);
+    if (integrateResult.changed || restructureResult.changed) {
       console.log(
         `[file2flow] restructured: ${restructureResult.violations.length} violation(s), ` +
         `${restructureResult.pathCount} path(s), cloned ${restructureResult.cloneCount} action(s)`
@@ -1570,20 +1573,26 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
     if (snap) {
       snap.step5_restructure = {
         skipped: false,
-        changed: restructureResult.changed,
+        integrateFloating: {
+          changed: integrateResult.changed,
+          integrated: integrateResult.integrated ?? 0,
+          notes: integrateResult.notes ?? [],
+        },
+        changed: integrateResult.changed || restructureResult.changed,
         violations: restructureResult.violations,
         pathCount: restructureResult.pathCount,
         cloneCount: restructureResult.cloneCount,
         pathsDeduped: restructureResult.pathsDeduped ?? 0,
         constraintNotes: restructureResult.constraintNotes ?? [],
-        graphAfter: restructureResult.changed
+        graphAfter: integrateResult.changed || restructureResult.changed
           ? { nodes: normalized.nodes, edges: normalized.edges }
           : null,
       };
       await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
     }
     emit('reorder', 'done', {
-      changed: restructureResult.changed,
+      changed: integrateResult.changed || restructureResult.changed,
+      integratedFloating: integrateResult.integrated ?? 0,
       violations: restructureResult.violations.length,
       pathCount: restructureResult.pathCount,
       cloneCount: restructureResult.cloneCount,
@@ -1878,6 +1887,160 @@ function enforceGraphStructuralConstraints(nodes, edges) {
   e = pruned;
 
   return { nodes: n, edges: e, notes, changed: notes.length > 0 };
+}
+
+/** Forward reachability and hop distance from DEFINITION. */
+function forwardReachFromDefinition(definitionId, edges) {
+  const reach = new Set([definitionId]);
+  const dist = new Map([[definitionId, 0]]);
+  const queue = [definitionId];
+  while (queue.length) {
+    const u = queue.shift();
+    for (const e of edges) {
+      if (e.sourceNodeId !== u) continue;
+      const v = e.targetNodeId;
+      if (!reach.has(v)) {
+        reach.add(v);
+        dist.set(v, dist.get(u) + 1);
+        queue.push(v);
+      }
+    }
+  }
+  return { reach, dist };
+}
+
+/**
+ * Splice floating DECISION nodes (not reachable from DEFINITION) into the main spine
+ * so paths follow DEFINITION → DECISION* → ACTION* instead of orphan decisions feeding mid-flow actions.
+ */
+function integrateFloatingDecisionsIntoFlow(graph) {
+  const notes = [];
+  let nodes = Array.isArray(graph?.nodes) ? [...graph.nodes] : [];
+  let edges = Array.isArray(graph?.edges) ? [...graph.edges] : [];
+  const definition = nodes.find((n) => n.type === NodeType.DEFINITION);
+  if (!definition) {
+    return { graph: { ...graph, nodes, edges }, changed: false, notes, integrated: 0 };
+  }
+
+  const edgeKey = (e) => `${e.sourceNodeId}|${e.sourceAnswerId || ''}|${e.targetNodeId}`;
+  const hasEdge = (list, sourceId, sourceAnswerId, targetId) =>
+    list.some(
+      (e) =>
+        e.sourceNodeId === sourceId &&
+        (e.sourceAnswerId || null) === (sourceAnswerId || null) &&
+        e.targetNodeId === targetId,
+    );
+
+  const pushEdge = (list, sourceId, sourceAnswerId, targetId) => {
+    if (hasEdge(list, sourceId, sourceAnswerId, targetId)) return false;
+    list.push({
+      id: id('edge'),
+      sourceNodeId: sourceId,
+      sourceAnswerId: sourceAnswerId || null,
+      targetNodeId: targetId,
+      isDeletable: true,
+    });
+    return true;
+  };
+
+  let changed = false;
+  let integrated = 0;
+  let { reach, dist } = forwardReachFromDefinition(definition.id, edges);
+
+  const floatingDecisions = () =>
+    nodes.filter((n) => n.type === NodeType.DECISION && !reach.has(n.id));
+
+  const pickAnchor = (d, nodeMap) => {
+    const targets = edges
+      .filter((e) => e.sourceNodeId === d.id)
+      .map((e) => nodeMap.get(e.targetNodeId))
+      .filter(Boolean);
+    return (
+      targets.find((t) => reach.has(t.id) && (t.type === NodeType.ACTION || t.type === NodeType.HANDLER)) ||
+      targets.find((t) => reach.has(t.id)) ||
+      nodes
+        .filter((n) => n.type === NodeType.ACTION && reach.has(n.id))
+        .sort((a, b) => (dist.get(a.id) ?? 999) - (dist.get(b.id) ?? 999))[0] ||
+      null
+    );
+  };
+
+  const findSpinePredecessor = (anchorId, nodeMap) => {
+    const incoming = edges.filter((e) => e.targetNodeId === anchorId && reach.has(e.sourceNodeId));
+    if (!incoming.length) return null;
+    let best = incoming[0];
+    let bestDist = dist.get(best.sourceNodeId) ?? -1;
+    for (const e of incoming.slice(1)) {
+      const d = dist.get(e.sourceNodeId) ?? -1;
+      if (d > bestDist) {
+        bestDist = d;
+        best = e;
+      }
+    }
+    return { nodeId: best.sourceNodeId, node: nodeMap.get(best.sourceNodeId) };
+  };
+
+  let guard = 0;
+  while (floatingDecisions().length && guard++ < 40) {
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+    const groups = new Map();
+
+    for (const d of floatingDecisions()) {
+      const anchor = pickAnchor(d, nodeMap);
+      if (!anchor) continue;
+      if (!groups.has(anchor.id)) groups.set(anchor.id, { anchor, decisions: [] });
+      if (!groups.get(anchor.id).decisions.some((x) => x.id === d.id)) {
+        groups.get(anchor.id).decisions.push(d);
+      }
+    }
+
+    if (!groups.size) break;
+
+    for (const { anchor, decisions } of groups.values()) {
+      decisions.sort((a, b) => (a.posY - b.posY) || (a.posX - b.posX) || a.id.localeCompare(b.id));
+      const pred = findSpinePredecessor(anchor.id, nodeMap);
+      if (!pred?.node) continue;
+
+      const predOutToAnchor = edges.filter(
+        (e) => e.sourceNodeId === pred.nodeId && e.targetNodeId === anchor.id,
+      );
+      if (predOutToAnchor.length === 1) {
+        const rmKey = edgeKey(predOutToAnchor[0]);
+        edges = edges.filter((e) => edgeKey(e) !== rmKey);
+        changed = true;
+        notes.push(`spliced:${pred.nodeId}->${anchor.id}`);
+      }
+
+      let prevId = pred.nodeId;
+      for (const d of decisions) {
+        if (pushEdge(edges, prevId, null, d.id)) {
+          changed = true;
+          integrated += 1;
+          notes.push(`linked:${prevId}->${d.id}`);
+        }
+        prevId = d.id;
+        reach.add(d.id);
+        dist.set(d.id, (dist.get(pred.nodeId) ?? 0) + decisions.indexOf(d) + 1);
+      }
+
+      const lastD = decisions[decisions.length - 1];
+      if (!edges.some((e) => e.sourceNodeId === lastD.id && e.targetNodeId === anchor.id)) {
+        const ans = lastD.answers?.[0];
+        if (pushEdge(edges, lastD.id, ans?.id || null, anchor.id)) {
+          changed = true;
+          notes.push(`linked:${lastD.id}->${anchor.id}`);
+        }
+      }
+    }
+
+    ({ reach, dist } = forwardReachFromDefinition(definition.id, edges));
+  }
+
+  if (integrated > 0) {
+    console.warn(`[file2flow] integrated ${integrated} floating DECISION node(s) into definition spine`);
+  }
+
+  return { graph: { ...graph, nodes, edges }, changed, notes, integrated };
 }
 
 function findActionToDecisionViolations(nodes, edges, definitionId) {
@@ -2383,10 +2546,6 @@ function validateFlow(flow) {
           emitted.add(key('daa'));
           orderErrors.push(`[ERROR] DECISION node "${node.label}" appears after an ACTION node on this branch (path: ${path.map(id => id.slice(-6)).join('→')}). Move this decision before the first ACTION, or restructure as a separate branch.`);
           return;
-        }
-        if (node.type === NodeType.ACTION && !seenDecision && !emitted.has(key('and'))) {
-          emitted.add(key('and'));
-          orderErrors.push(`[ERROR] ACTION node "${node.label}" is reached with no DECISION node preceding it on this branch. Add a decision question upstream.`);
         }
         if (node.type === NodeType.HANDLER && !node.content?.hiddenFromResearchers && !seenAction && !emitted.has(key('pba'))) {
           emitted.add(key('pba'));

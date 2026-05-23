@@ -49,7 +49,7 @@ flowchart LR
 | 2. 预处理 | `prompts/file2flow/02-source-preprocess.md` | 是（可跳过） | **转述后**全文 `{{SOURCE_TEXT}}` → `candidatePoints`、分支 dossier 等 |
 | 3. 候选点补全 | `prompts/file2flow/03-complete-candidate-points.md` | 是（可跳过） | **原始**正文 + 转述文 + `candidatePoints` JSON；可新增点、补 `predecessorId` |
 | 4. 构图 | `prompts/file2flow/04-graph-from-source.md` | 是 | 转述全文 + **formatPreprocessDossier** 注入段 |
-| **5. 微调顺序** | **`restructureDecisionsBeforeActions()`**（server.mjs） | **否** | normalize 后的图；强制 `DEFINITION → DECISION* → (ACTION\|PEOPLE)*` 形状；仅检测到违规时重写 |
+| **5. 微调顺序** | **`integrateFloatingDecisionsIntoFlow()`** + **`restructureDecisionsBeforeActions()`** | **否** | 先把游离 DECISION 插回 Definition 主链；再处理 ACTION→DECISION 违规时按路径重建 |
 | — | `prompts/file2flow/05-json-repair.md` | 仅 **JSON 解析失败** | 预处理 / 补全 / 构图 任意一步坏 JSON 时的修复提示 |
 
 **构图提示**要求与 **candidatePoints** 逐项对应（lockstep）：每个候选点对应一个 `nodes[]` 项，`tempId` = 该点 `id`（如 `pt-1`）；按 `predecessorId` 连边；同一 DECISION 多子节点时需多 answer + 多出口边（见模板正文）。
