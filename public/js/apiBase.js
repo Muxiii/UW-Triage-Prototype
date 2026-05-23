@@ -8,8 +8,7 @@ function normalizeApiBase(raw) {
   return absolute.endsWith('/api') ? absolute : `${absolute}/api`;
 }
 
-// `var` + window: Babel standalone scripts (type="text/babel") do not see `const` from other files.
-var API_BASE = normalizeApiBase(
-  typeof window !== 'undefined' ? window.__RUNTIME_CONFIG__?.apiBase : undefined,
-);
-if (typeof window !== 'undefined') window.API_BASE = API_BASE;
+// Babel `type="text/babel"` bundles run in strict IIFE — use window.API_BASE in those files.
+if (typeof window !== 'undefined') {
+  window.API_BASE = normalizeApiBase(window.__RUNTIME_CONFIG__?.apiBase ?? window.API_BASE);
+}

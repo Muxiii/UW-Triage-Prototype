@@ -279,7 +279,7 @@ async function extractPdfTextWithPdfJs(file) {
 
 async function extractLegacyDocViaApi(file) {
   const base64 = await fileToBase64DataUrl(file);
-  const res = await fetch(`${API_BASE}/extract-doc-text`, {
+  const res = await fetch(`${window.API_BASE}/extract-doc-text`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ filename: file.name || 'upload.doc', base64 }),
@@ -325,7 +325,7 @@ async function extractUploadTextForAi(file) {
 async function extractUrlTextForAi(url) {
   const trimmed = String(url || '').trim();
   if (!trimmed) return '';
-  const res = await fetch(`${API_BASE}/extract-url-text`, {
+  const res = await fetch(`${window.API_BASE}/extract-url-text`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url: trimmed }),

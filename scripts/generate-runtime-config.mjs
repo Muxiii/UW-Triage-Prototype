@@ -27,6 +27,7 @@ if (process.env.VERCEL && (!process.env.VITE_API_BASE || apiBase === '/api')) {
 }
 const content = `// Auto-generated at deploy time from VITE_API_BASE. Local default: /api
 window.__RUNTIME_CONFIG__ = { apiBase: ${JSON.stringify(apiBase)} };
+window.API_BASE = window.__RUNTIME_CONFIG__.apiBase;
 `;
 
 await writeFile(outPath, content, 'utf8');

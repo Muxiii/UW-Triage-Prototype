@@ -1880,7 +1880,7 @@ function AiAssistantPanel({ graph, flowTitle, onApplyAssistantOperations, onUndo
       const sourceText = await buildSourceText();
       if (!sourceText && !anyUrl()) throw new Error('Add instructions, upload a file, or paste text.');
       const ctx = graphToAssistantContext(graph);
-      const res = await fetch(`${API_BASE}/assistant`, {
+      const res = await fetch(`${window.API_BASE}/assistant`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2502,7 +2502,7 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
       // Streaming: server emits one NDJSON event per pipeline step boundary,
       // ending with {type:'result'} or {type:'error'}. We never advance the
       // progress UI on a fake timer.
-      const streamUrl = `${API_BASE}/flows?stream=1`;
+      const streamUrl = `${window.API_BASE}/flows?stream=1`;
       const res = await fetch(streamUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', accept: 'application/x-ndjson' },
@@ -2591,7 +2591,7 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
       }
 
       if (!finalResult || !finalResult.flow) {
-        const apiHint = API_BASE.startsWith('http') ? API_BASE : `${API_BASE} (same-origin — set VITE_API_BASE to Render URL on Vercel)`;
+        const apiHint = window.API_BASE.startsWith('http') ? window.API_BASE : `${window.API_BASE} (same-origin — set VITE_API_BASE to Render URL on Vercel)`;
         const stepHint = lastStepId ? ` Last server step: "${lastStepId}".` : '';
         throw new Error(
           `AI analysis finished but no flow was returned.${stepHint} `

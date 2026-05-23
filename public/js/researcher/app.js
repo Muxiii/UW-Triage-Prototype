@@ -44,12 +44,12 @@ function Portal() {
     let alive = true;
     async function loadPublicDocs() {
       try {
-        const listRes = await fetch(`${API_BASE}/knowledge-base`);
+        const listRes = await fetch(`${window.API_BASE}/knowledge-base`);
         const listData = await listRes.json();
         const items = listData.items || [];
         if (!items.length) return;
         const snapshots = await Promise.all(items.map(async (item) => {
-          const detailRes = await fetch(`${API_BASE}/knowledge-base/${item.id}`);
+          const detailRes = await fetch(`${window.API_BASE}/knowledge-base/${item.id}`);
           const detailData = await detailRes.json();
           return detailData.snapshot;
         }));

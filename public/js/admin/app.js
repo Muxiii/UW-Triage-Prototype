@@ -99,8 +99,8 @@ function App() {
     async function loadBackendFlows() {
       try {
         const [res, trashRes] = await Promise.all([
-          fetch(`${API_BASE}/flows`),
-          fetch(`${API_BASE}/flows?trash=1`),
+          fetch(`${window.API_BASE}/flows`),
+          fetch(`${window.API_BASE}/flows?trash=1`),
         ]);
         const data = await res.json();
         const trashData = await trashRes.json();
@@ -140,7 +140,7 @@ function App() {
       } catch (error) {
         const msg = error?.message || 'Failed to load saved flows';
         const hint = /expected pattern/i.test(msg)
-          ? ` Invalid API URL (${API_BASE}). Set VITE_API_BASE to https://your-service.onrender.com/api on Vercel.`
+          ? ` Invalid API URL (${window.API_BASE}). Set VITE_API_BASE to https://your-service.onrender.com/api on Vercel.`
           : '';
         pushToast(msg + hint);
       }
@@ -171,7 +171,7 @@ function App() {
     }
     try {
       const updatedFlow = builderGraphToBackendFlow(activeBackendFlow, currentGraph.nodes?.length ? currentGraph.nodes : activeGraph?.nodes || [], currentGraph.edges?.length ? currentGraph.edges : activeGraph?.edges || []);
-      const saveRes = await fetch(`${API_BASE}/flows/${activeBackendFlow.id}`, {
+      const saveRes = await fetch(`${window.API_BASE}/flows/${activeBackendFlow.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -184,7 +184,7 @@ function App() {
       const saveData = await saveRes.json();
       if (!saveRes.ok) throw new Error(saveData.error || 'Save before publish failed');
 
-      const res = await fetch(`${API_BASE}/flows/${activeBackendFlow.id}/publish`, {
+      const res = await fetch(`${window.API_BASE}/flows/${activeBackendFlow.id}/publish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ publishScope: 'PUBLIC' }),
@@ -210,7 +210,7 @@ function App() {
     try {
       // Use the existing /publish endpoint with INTERNAL scope — hides the flow from the
       // researcher portal (knowledge-base only serves PUBLIC snapshots) without a new route.
-      const res = await fetch(`${API_BASE}/flows/${activeBackendFlow.id}/publish`, {
+      const res = await fetch(`${window.API_BASE}/flows/${activeBackendFlow.id}/publish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ publishScope: 'INTERNAL' }),
@@ -231,7 +231,7 @@ function App() {
   const executeTrashCard = useCallback(async (card) => {
     try {
       if (card.backendFlow) {
-        const res = await fetch(`${API_BASE}/flows/${card.backendFlow.id}`, { method: 'DELETE' });
+        const res = await fetch(`${window.API_BASE}/flows/${card.backendFlow.id}`, { method: 'DELETE' });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Move to trash failed');
         setGeneratedFlowCards((cards) => cards.filter((item) => item.id !== card.id));
@@ -273,7 +273,7 @@ function App() {
   const handleRestoreFlow = useCallback(async (card) => {
     if (!card.backendFlow) return;
     try {
-      const res = await fetch(`${API_BASE}/flows/${card.backendFlow.id}/restore`, { method: 'POST' });
+      const res = await fetch(`${window.API_BASE}/flows/${card.backendFlow.id}/restore`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Restore failed');
       setTrashedFlowCards((cards) => cards.filter((item) => item.id !== card.id));
@@ -287,7 +287,7 @@ function App() {
   const executePermanentDelete = useCallback(async (card) => {
     try {
       if (card.backendFlow) {
-        const res = await fetch(`${API_BASE}/flows/${card.backendFlow.id}/permanent`, { method: 'DELETE' });
+        const res = await fetch(`${window.API_BASE}/flows/${card.backendFlow.id}/permanent`, { method: 'DELETE' });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Permanent delete failed');
       }
@@ -306,7 +306,7 @@ function App() {
     const nextName = window.prompt('Rename flow', card.name);
     if (!nextName || nextName.trim() === card.name) return;
     try {
-      const res = await fetch(`${API_BASE}/flows/${card.backendFlow.id}`, {
+      const res = await fetch(`${window.API_BASE}/flows/${card.backendFlow.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: nextName.trim() }),
