@@ -66,7 +66,10 @@ npm run db:migrate
 
    `VITE_API_BASE` = `https://your-api.onrender.com/api`
 
-   部署时会运行 `npm run vercel:build`，把该值写入 `public/js/runtime-config.js`。
+   必须是 **Render 的完整 HTTPS 地址**（含 `/api`），不要用 `/api` 相对路径。  
+   部署后打开 `https://你的项目.vercel.app/js/runtime-config.js` 确认不是 `apiBase: "/api"`。
+
+   File2Flow 生成 flow 要 1–3 分钟，请让浏览器 **直连 Render**；不要用 Vercel 把 `/api` 反代到 Render（容易 ~60s 断流，表现为「分析完但没有 flow」）。
 
 4. 确保 Render API 已开启 CORS（服务端已设置 `Access-Control-Allow-Origin: *`）。
 

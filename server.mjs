@@ -1201,6 +1201,15 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
     try { onEvent({ type: 'step', id, status, ...(meta ? { meta } : {}) }); } catch { /* never let UI break a step */ }
   };
 
+  const streaming = onEvent !== (() => {});
+  let heartbeatTimer;
+  if (streaming) {
+    heartbeatTimer = setInterval(() => {
+      try { onEvent({ type: 'heartbeat', ts: now() }); } catch { /* ignore */ }
+    }, 15000);
+  }
+
+  try {
   // ── Step 0 — smart URL exploration (no recursion). One LLM call to decide
   //    which URLs in the source text to fetch, then up to 3 fetches appended
   //    to the source. Fails open: any error leaves the source untouched.
@@ -1622,6 +1631,9 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
   }
 
   return normalized;
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+  }
 }
 
 /** Strip `//` line comments (common when the model elides nodes with "..."). */
@@ -2932,8 +2944,16 @@ async function handleApi(req, res, url) {
         'cache-control': 'no-cache',
         'x-accel-buffering': 'no', // hint nginx/cloud proxies not to buffer
       });
+      let sentResult = false;
+      let sentError = false;
       const writeEvent = (event) => {
-        try { res.write(`${JSON.stringify(event)}\n`); } catch { /* socket closed */ }
+        try {
+          res.write(`${JSON.stringify(event)}\n`);
+          if (event?.type === 'result') sentResult = true;
+          if (event?.type === 'error') sentError = true;
+        } catch (err) {
+          console.warn('[flows stream] write failed:', err?.message || err);
+        }
       };
       writeEvent({ type: 'start', ts: now() });
       try {
@@ -2968,8 +2988,15 @@ async function handleApi(req, res, url) {
         }
         writeEvent(resultEvent);
       } catch (error) {
+        console.error('[flows stream]', error?.message || error);
         writeEvent({ type: 'error', message: error?.message || 'Generation failed.' });
       } finally {
+        if (!sentResult && !sentError) {
+          writeEvent({
+            type: 'error',
+            message: 'Pipeline ended before a result was sent (client or proxy may have closed the connection).',
+          });
+        }
         res.end();
       }
       return;

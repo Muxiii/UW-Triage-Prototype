@@ -138,7 +138,11 @@ function App() {
           setTrashedFlowCards((trashData.flows || []).map((flow) => flowToCard(flow)));
         }
       } catch (error) {
-        pushToast(error.message || 'Failed to load saved flows');
+        const msg = error?.message || 'Failed to load saved flows';
+        const hint = /expected pattern/i.test(msg)
+          ? ` Invalid API URL (${API_BASE}). Set VITE_API_BASE to https://your-service.onrender.com/api on Vercel.`
+          : '';
+        pushToast(msg + hint);
       }
     }
     loadBackendFlows();

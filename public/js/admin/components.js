@@ -2502,7 +2502,8 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
       // Streaming: server emits one NDJSON event per pipeline step boundary,
       // ending with {type:'result'} or {type:'error'}. We never advance the
       // progress UI on a fake timer.
-      const res = await fetch(`${API_BASE}/flows?stream=1`, {
+      const streamUrl = `${API_BASE}/flows?stream=1`;
+      const res = await fetch(streamUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', accept: 'application/x-ndjson' },
         body: JSON.stringify({
@@ -2513,15 +2514,18 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
           ...(file2flowDebug ? { debugFile2flow: true } : {}),
         }),
       });
-      if (!res.ok && !res.body) {
+      if (!res.body) {
         const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error || `AI analysis failed (HTTP ${res.status})`);
+        throw new Error(errBody.error || `AI analysis failed (HTTP ${res.status}, no response body)`);
       }
 
       let finalResult = null;
       let streamedError = null;
+      let lastStepId = null;
+      let rawStream = '';
       const handleEvent = (evt) => {
         if (evt?.type === 'step') {
+          lastStepId = evt.id || lastStepId;
           if (pipelineIndex(evt.id) < 0) return;
           if (evt.status === 'start') {
             patchStep(evt.id, 'active');
@@ -2541,7 +2545,9 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buf += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
+        rawStream += chunk;
+        buf += chunk;
         const lines = buf.split('\n');
         buf = lines.pop(); // last (possibly partial) line stays in buffer
         for (const line of lines) {
@@ -2558,25 +2564,41 @@ function NewFlowModal({ open, onClose, onScratch, toast, onGenerated }) {
 
       if (streamedError) throw streamedError;
 
-      // Legacy fallback: older servers (without streaming support) return a single
-      // {flow, issues} JSON body and ignore ?stream=1. Detect that shape and
-      // treat it as a synthetic result event so the new client still works.
-      if (!finalResult || !finalResult.flow) {
-        const fallbackText = (buf && buf.trim()) || null;
-        if (fallbackText) {
+      // Re-scan full stream (handles chunked NDJSON + legacy single-json responses).
+      if (!finalResult?.flow && rawStream.trim()) {
+        for (const line of rawStream.split('\n')) {
+          if (!line.trim()) continue;
           try {
-            const single = JSON.parse(fallbackText);
-            if (single && single.flow) {
-              finalResult = { type: 'result', ...single };
-            } else if (single && single.error) {
-              throw new Error(single.error);
-            }
-          } catch (_) { /* fall through to no-flow error */ }
+            const evt = JSON.parse(line);
+            if (evt?.type === 'result' && evt.flow) finalResult = evt;
+            if (evt?.type === 'error') streamedError = new Error(evt.message || 'AI analysis failed');
+          } catch { /* ignore bad line */ }
+        }
+        if (streamedError) throw streamedError;
+        if (!finalResult?.flow) {
+          try {
+            const single = JSON.parse(rawStream.trim());
+            if (single?.flow) finalResult = { type: 'result', ...single };
+            else if (single?.error) throw new Error(single.error);
+          } catch { /* not a single JSON body */ }
         }
       }
 
+      if (!res.ok && !finalResult?.flow) {
+        throw new Error(
+          `AI analysis failed (HTTP ${res.status}). Check that VITE_API_BASE points to your Render API (https://…onrender.com/api), not Vercel /api.`
+        );
+      }
+
       if (!finalResult || !finalResult.flow) {
-        throw new Error('AI analysis finished but no flow was returned. (If you recently updated the server, restart `npm run dev` so the new streaming endpoint is loaded.)');
+        const apiHint = API_BASE.startsWith('http') ? API_BASE : `${API_BASE} (same-origin — set VITE_API_BASE to Render URL on Vercel)`;
+        const stepHint = lastStepId ? ` Last server step: "${lastStepId}".` : '';
+        throw new Error(
+          `AI analysis finished but no flow was returned.${stepHint} `
+          + `Request: ${streamUrl}. API base: ${apiHint}. `
+          + 'If steps stop mid-way, the connection may have timed out (use full Render URL, not a Vercel /api proxy). '
+          + 'Check Render logs for the same request.'
+        );
       }
 
       setAiPipelineIndex(FILE2FLOW_AI_PIPELINE_STEPS.length - 1);
