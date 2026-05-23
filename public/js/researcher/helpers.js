@@ -217,7 +217,7 @@ function Avatar({ name, size = 38 }) {
 const DOC_TYPES = [];
 
 const DOC_BY_ID = Object.fromEntries(DOC_TYPES.map((d) => [d.id, d]));
-const API_BASE = "/api";
+// API_BASE is defined in /js/apiBase.js (loaded before this file)
 
 function snapshotToDoc(snapshot) {
   const graph = snapshot?.snapshotJson || {};

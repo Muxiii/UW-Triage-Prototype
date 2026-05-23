@@ -18,7 +18,7 @@ Open:
 ## Prototype Scope
 
 - Uses the DOCX graph model: `Flow`, `Node`, `Answer`, `Edge`, `PublishedSnapshot`.
-- Uses local JSON persistence in `data/db.json`.
+- Uses local JSON persistence in `data/db.json` by default, or **Supabase** when `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` are set (see [docs/SUPABASE.md](docs/SUPABASE.md)).
 - Serves copied versions of the existing Builder Admin and Researcher HTML demos as the UI shell.
 - Keeps the copied UI layout/menu/canvas/modal structure intact; backend work is wired behind existing controls.
 - Generates a DOCX-shaped initial graph from uploaded/pasted text through the existing Create New Flow modal.

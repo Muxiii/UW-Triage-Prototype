@@ -1,20 +1,21 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import crypto from 'node:crypto';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
+import { getStore } from './lib/store.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 const WordExtractorCtor = require('word-extractor');
 
-const DB_PATH = path.join(__dirname, 'data', 'db.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const PUBLIC_API_BASE = process.env.PUBLIC_API_BASE || '/api';
+const store = getStore();
 const PORT = Number(process.env.PORT || 3100);
 /** Max completion tokens (output). No app-side floor; set env to cap. Provider still enforces model max. */
 function envOutputTokens(primaryEnv, fallbackDefault) {
@@ -54,15 +55,6 @@ function id(prefix) {
 
 function now() {
   return new Date().toISOString();
-}
-
-async function readDb() {
-  if (!existsSync(DB_PATH)) return { flows: [], publishedSnapshots: [] };
-  return JSON.parse(await readFile(DB_PATH, 'utf8'));
-}
-
-async function writeDb(db) {
-  await writeFile(DB_PATH, `${JSON.stringify(db, null, 2)}\n`, 'utf8');
 }
 
 function send(res, status, body, headers = {}) {
@@ -2875,9 +2867,13 @@ async function handleExtractDocText(req, res) {
   }
 }
 
+function serveRuntimeConfig(res) {
+  const body = `window.__RUNTIME_CONFIG__=${JSON.stringify({ apiBase: PUBLIC_API_BASE })};`;
+  return send(res, 200, body, { 'content-type': 'application/javascript; charset=utf-8' });
+}
+
 async function handleApi(req, res, url) {
   if (req.method === 'OPTIONS') return send(res, 204, '');
-  const db = await readDb();
 
   if (req.method === 'POST' && url.pathname === '/api/extract-doc-text') {
     return handleExtractDocText(req, res);
@@ -2893,7 +2889,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && url.pathname === '/api/flows') {
     const includeTrash = url.searchParams.get('trash') === '1';
-    const flows = (db.flows || []).filter((flow) => includeTrash ? flow.trashedAt : !flow.trashedAt);
+    const flows = await store.listFlows({ includeTrash });
     return send(res, 200, { flows });
   }
 
@@ -2939,8 +2935,7 @@ async function handleApi(req, res, url) {
         writeEvent({ type: 'step', id: 'validate', status: 'start' });
         const issues = validateFlow(flow);
         writeEvent({ type: 'step', id: 'validate', status: 'done', meta: { errors: issues.errors?.length || 0, warnings: issues.warnings?.length || 0 } });
-        db.flows.unshift(flow);
-        await writeDb(db);
+        await store.insertFlow(flow);
         const resultEvent = { type: 'result', flow, issues };
         if (debugFile2flow) {
           resultEvent.file2flowDebugPath = 'data/file2flow-debug-last.json';
@@ -2976,8 +2971,7 @@ async function handleApi(req, res, url) {
       updatedAt: time,
     };
     const issues = validateFlow(flow);
-    db.flows.unshift(flow);
-    await writeDb(db);
+    await store.insertFlow(flow);
     const payload = { flow, issues };
     if (debugFile2flow) {
       payload.file2flowDebugPath = 'data/file2flow-debug-last.json';
@@ -2989,13 +2983,13 @@ async function handleApi(req, res, url) {
 
   const flowMatch = url.pathname.match(/^\/api\/flows\/([^/]+)$/);
   if (req.method === 'GET' && flowMatch) {
-    const flow = db.flows.find((f) => f.id === flowMatch[1]);
+    const flow = await store.getFlow(flowMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     return send(res, 200, { flow, issues: validateFlow(flow) });
   }
 
   if (req.method === 'PUT' && flowMatch) {
-    const flow = db.flows.find((f) => f.id === flowMatch[1]);
+    const flow = await store.getFlow(flowMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     const body = await readJson(req);
     flow.name = body.name ?? flow.name;
@@ -3004,53 +2998,51 @@ async function handleApi(req, res, url) {
     flow.edges = Array.isArray(body.edges) ? body.edges : flow.edges;
     flow.version += 1;
     flow.updatedAt = now();
-    await writeDb(db);
+    await store.updateFlow(flow);
     return send(res, 200, { flow, issues: validateFlow(flow) });
   }
 
   if (req.method === 'DELETE' && flowMatch) {
     const flowId = flowMatch[1];
-    const flow = db.flows.find((f) => f.id === flowId);
+    const flow = await store.getFlow(flowId);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     flow.trashedAt = now();
     flow.status = FlowStatus.DRAFT;
     flow.publishScope = null;
     flow.updatedAt = now();
-    db.publishedSnapshots = db.publishedSnapshots.filter((s) => s.flowId !== flowId);
-    await writeDb(db);
+    await store.removeSnapshotsForFlow(flowId);
+    await store.updateFlow(flow);
     return send(res, 200, { trashed: true, flowId, flow });
   }
 
   const restoreMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/restore$/);
   if (req.method === 'POST' && restoreMatch) {
-    const flow = db.flows.find((f) => f.id === restoreMatch[1]);
+    const flow = await store.getFlow(restoreMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     flow.trashedAt = undefined;
     flow.status = FlowStatus.DRAFT;
     flow.updatedAt = now();
-    await writeDb(db);
+    await store.updateFlow(flow);
     return send(res, 200, { flow });
   }
 
   const permanentDeleteMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/permanent$/);
   if (req.method === 'DELETE' && permanentDeleteMatch) {
     const flowId = permanentDeleteMatch[1];
-    db.flows = db.flows.filter((f) => f.id !== flowId);
-    db.publishedSnapshots = db.publishedSnapshots.filter((s) => s.flowId !== flowId);
-    await writeDb(db);
+    await store.deleteFlowPermanent(flowId);
     return send(res, 200, { deleted: true, flowId });
   }
 
   const validateMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/validate$/);
   if (req.method === 'GET' && validateMatch) {
-    const flow = db.flows.find((f) => f.id === validateMatch[1]);
+    const flow = await store.getFlow(validateMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     return send(res, 200, { issues: validateFlow(flow) });
   }
 
   const publishMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/publish$/);
   if (req.method === 'POST' && publishMatch) {
-    const flow = db.flows.find((f) => f.id === publishMatch[1]);
+    const flow = await store.getFlow(publishMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     const body = await readJson(req);
     const scope = body.publishScope === PublishScope.INTERNAL ? PublishScope.INTERNAL : PublishScope.PUBLIC;
@@ -3060,26 +3052,25 @@ async function handleApi(req, res, url) {
     flow.publishScope = scope;
     flow.updatedAt = now();
     const snapshot = createSnapshot(flow, scope);
-    db.publishedSnapshots = db.publishedSnapshots.filter((s) => s.flowId !== flow.id);
-    db.publishedSnapshots.unshift(snapshot);
-    await writeDb(db);
+    await store.replaceSnapshotForFlow(snapshot);
+    await store.updateFlow(flow);
     return send(res, 200, { flow, snapshot });
   }
 
   const unpublishMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/unpublish$/);
   if (req.method === 'POST' && unpublishMatch) {
-    const flow = db.flows.find((f) => f.id === unpublishMatch[1]);
+    const flow = await store.getFlow(unpublishMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     flow.publishScope = null;
     flow.status = FlowStatus.DRAFT;
     flow.updatedAt = now();
-    db.publishedSnapshots = db.publishedSnapshots.filter((s) => s.flowId !== flow.id);
-    await writeDb(db);
+    await store.removeSnapshotsForFlow(flow.id);
+    await store.updateFlow(flow);
     return send(res, 200, { flow });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/knowledge-base') {
-    const publicSnapshots = db.publishedSnapshots.filter((s) => s.publishScope === PublishScope.PUBLIC);
+    const publicSnapshots = await store.listPublicSnapshots();
     const items = publicSnapshots.map((s) => ({
       id: s.flowId,
       name: s.snapshotJson.flow.name,
@@ -3092,7 +3083,7 @@ async function handleApi(req, res, url) {
 
   const kbMatch = url.pathname.match(/^\/api\/knowledge-base\/([^/]+)$/);
   if (req.method === 'GET' && kbMatch) {
-    const snapshot = db.publishedSnapshots.find((s) => s.flowId === kbMatch[1] && s.publishScope === PublishScope.PUBLIC);
+    const snapshot = await store.getPublicSnapshot(kbMatch[1]);
     if (!snapshot) return send(res, 404, { error: 'Public flow not found.' });
     return send(res, 200, { snapshot });
   }
@@ -3124,6 +3115,7 @@ async function start() {
   createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${req.headers.host}`);
+      if (url.pathname === '/runtime-config.js') return serveRuntimeConfig(res);
       if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url);
       return await serveStatic(req, res, url);
     } catch (error) {

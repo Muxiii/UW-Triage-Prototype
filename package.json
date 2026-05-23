@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node server.mjs",
-    "start": "node server.mjs"
+    "dev": "node --env-file=.env server.mjs",
+    "start": "node --env-file=.env server.mjs",
+    "db:migrate": "node --env-file=.env scripts/migrate-db-to-supabase.mjs"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.8",
     "word-extractor": "^1.0.4"
   }
 }

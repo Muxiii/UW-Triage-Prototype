@@ -236,7 +236,7 @@ function panForDefinition(nodes) {
 }
 
 const NODE_W = 240;
-const API_BASE = '/api';
+// API_BASE is defined in /js/apiBase.js (loaded before this file)
 
 /**
  * Plain text from an uploaded file for AI / POST /api/flows.
