@@ -58,6 +58,8 @@ npm run db:migrate
 
 ### Vercel（仅静态前端）
 
+**Vercel 不要跑 `server.mjs`。** API 只在 Render 上运行；Supabase 变量配在 **Render**，不是 Vercel。若 Vercel Logs 出现 `/var/task` 或 `getStore` 报错，说明误把后端部署到了 Vercel——检查项目 **不要** 设置 Start Command / `npm start`，并确保仓库含 `.vercelignore`。
+
 1. **不要**把 Root Directory 设成 `public`；用仓库根目录，由根目录 `vercel.json` 负责构建并输出 `public/`。
 2. **Settings → Environment Variables** 添加（与 Vite 项目相同）：
 

@@ -1,0 +1,6 @@
+# Vercel hosts static files only (public/). Do not deploy the Node API here — use Render.
+server.mjs
+lib/
+data/
+prompts/
+node_modules/

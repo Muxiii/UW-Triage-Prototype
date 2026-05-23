@@ -16,8 +16,13 @@ const WordExtractorCtor = require('word-extractor');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PUBLIC_API_BASE = process.env.PUBLIC_API_BASE || '/api';
-const store = getStore();
 const PORT = Number(process.env.PORT || 3100);
+
+let storeInstance;
+function store() {
+  if (!storeInstance) storeInstance = getStore();
+  return storeInstance;
+}
 /** Max completion tokens (output). No app-side floor; set env to cap. Provider still enforces model max. */
 function envOutputTokens(primaryEnv, fallbackDefault) {
   const v = Number(process.env[primaryEnv]) || Number(process.env.AI_MAX_OUTPUT_TOKENS);
@@ -2908,7 +2913,7 @@ async function handleApi(req, res, url) {
 
   if (req.method === 'GET' && url.pathname === '/api/flows') {
     const includeTrash = url.searchParams.get('trash') === '1';
-    const flows = await store.listFlows({ includeTrash });
+    const flows = await store().listFlows({ includeTrash });
     return send(res, 200, { flows });
   }
 
@@ -2954,7 +2959,7 @@ async function handleApi(req, res, url) {
         writeEvent({ type: 'step', id: 'validate', status: 'start' });
         const issues = validateFlow(flow);
         writeEvent({ type: 'step', id: 'validate', status: 'done', meta: { errors: issues.errors?.length || 0, warnings: issues.warnings?.length || 0 } });
-        await store.insertFlow(flow);
+        await store().insertFlow(flow);
         const resultEvent = { type: 'result', flow, issues };
         if (debugFile2flow) {
           resultEvent.file2flowDebugPath = 'data/file2flow-debug-last.json';
@@ -2990,7 +2995,7 @@ async function handleApi(req, res, url) {
       updatedAt: time,
     };
     const issues = validateFlow(flow);
-    await store.insertFlow(flow);
+    await store().insertFlow(flow);
     const payload = { flow, issues };
     if (debugFile2flow) {
       payload.file2flowDebugPath = 'data/file2flow-debug-last.json';
@@ -3002,13 +3007,13 @@ async function handleApi(req, res, url) {
 
   const flowMatch = url.pathname.match(/^\/api\/flows\/([^/]+)$/);
   if (req.method === 'GET' && flowMatch) {
-    const flow = await store.getFlow(flowMatch[1]);
+    const flow = await store().getFlow(flowMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     return send(res, 200, { flow, issues: validateFlow(flow) });
   }
 
   if (req.method === 'PUT' && flowMatch) {
-    const flow = await store.getFlow(flowMatch[1]);
+    const flow = await store().getFlow(flowMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     const body = await readJson(req);
     flow.name = body.name ?? flow.name;
@@ -3017,51 +3022,51 @@ async function handleApi(req, res, url) {
     flow.edges = Array.isArray(body.edges) ? body.edges : flow.edges;
     flow.version += 1;
     flow.updatedAt = now();
-    await store.updateFlow(flow);
+    await store().updateFlow(flow);
     return send(res, 200, { flow, issues: validateFlow(flow) });
   }
 
   if (req.method === 'DELETE' && flowMatch) {
     const flowId = flowMatch[1];
-    const flow = await store.getFlow(flowId);
+    const flow = await store().getFlow(flowId);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     flow.trashedAt = now();
     flow.status = FlowStatus.DRAFT;
     flow.publishScope = null;
     flow.updatedAt = now();
-    await store.removeSnapshotsForFlow(flowId);
-    await store.updateFlow(flow);
+    await store().removeSnapshotsForFlow(flowId);
+    await store().updateFlow(flow);
     return send(res, 200, { trashed: true, flowId, flow });
   }
 
   const restoreMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/restore$/);
   if (req.method === 'POST' && restoreMatch) {
-    const flow = await store.getFlow(restoreMatch[1]);
+    const flow = await store().getFlow(restoreMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     flow.trashedAt = undefined;
     flow.status = FlowStatus.DRAFT;
     flow.updatedAt = now();
-    await store.updateFlow(flow);
+    await store().updateFlow(flow);
     return send(res, 200, { flow });
   }
 
   const permanentDeleteMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/permanent$/);
   if (req.method === 'DELETE' && permanentDeleteMatch) {
     const flowId = permanentDeleteMatch[1];
-    await store.deleteFlowPermanent(flowId);
+    await store().deleteFlowPermanent(flowId);
     return send(res, 200, { deleted: true, flowId });
   }
 
   const validateMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/validate$/);
   if (req.method === 'GET' && validateMatch) {
-    const flow = await store.getFlow(validateMatch[1]);
+    const flow = await store().getFlow(validateMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     return send(res, 200, { issues: validateFlow(flow) });
   }
 
   const publishMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/publish$/);
   if (req.method === 'POST' && publishMatch) {
-    const flow = await store.getFlow(publishMatch[1]);
+    const flow = await store().getFlow(publishMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     const body = await readJson(req);
     const scope = body.publishScope === PublishScope.INTERNAL ? PublishScope.INTERNAL : PublishScope.PUBLIC;
@@ -3071,25 +3076,25 @@ async function handleApi(req, res, url) {
     flow.publishScope = scope;
     flow.updatedAt = now();
     const snapshot = createSnapshot(flow, scope);
-    await store.replaceSnapshotForFlow(snapshot);
-    await store.updateFlow(flow);
+    await store().replaceSnapshotForFlow(snapshot);
+    await store().updateFlow(flow);
     return send(res, 200, { flow, snapshot });
   }
 
   const unpublishMatch = url.pathname.match(/^\/api\/flows\/([^/]+)\/unpublish$/);
   if (req.method === 'POST' && unpublishMatch) {
-    const flow = await store.getFlow(unpublishMatch[1]);
+    const flow = await store().getFlow(unpublishMatch[1]);
     if (!flow) return send(res, 404, { error: 'Flow not found.' });
     flow.publishScope = null;
     flow.status = FlowStatus.DRAFT;
     flow.updatedAt = now();
-    await store.removeSnapshotsForFlow(flow.id);
-    await store.updateFlow(flow);
+    await store().removeSnapshotsForFlow(flow.id);
+    await store().updateFlow(flow);
     return send(res, 200, { flow });
   }
 
   if (req.method === 'GET' && url.pathname === '/api/knowledge-base') {
-    const publicSnapshots = await store.listPublicSnapshots();
+    const publicSnapshots = await store().listPublicSnapshots();
     const items = publicSnapshots.map((s) => ({
       id: s.flowId,
       name: s.snapshotJson.flow.name,
@@ -3102,7 +3107,7 @@ async function handleApi(req, res, url) {
 
   const kbMatch = url.pathname.match(/^\/api\/knowledge-base\/([^/]+)$/);
   if (req.method === 'GET' && kbMatch) {
-    const snapshot = await store.getPublicSnapshot(kbMatch[1]);
+    const snapshot = await store().getPublicSnapshot(kbMatch[1]);
     if (!snapshot) return send(res, 404, { error: 'Public flow not found.' });
     return send(res, 200, { snapshot });
   }
@@ -3130,6 +3135,7 @@ async function serveStatic(req, res, url) {
 
 async function start() {
   await ensureAiConfigInteractive();
+  store(); // init Supabase/file backend before accepting traffic
 
   createServer(async (req, res) => {
     try {
