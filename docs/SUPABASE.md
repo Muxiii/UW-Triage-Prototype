@@ -56,12 +56,12 @@ npm run db:migrate
 
 ### Vercel（仅静态前端）
 
-1. Root Directory 指向 `public`，或把 `public/` 作为站点根目录。
-2. 在 `public/js/runtime-config.js` 中设置 API 地址，或在构建时生成：
+1. **不要**把 Root Directory 设成 `public`；用仓库根目录，由根目录 `vercel.json` 负责构建并输出 `public/`。
+2. **Settings → Environment Variables** 添加（与 Vite 项目相同）：
 
-```javascript
-window.__RUNTIME_CONFIG__ = { apiBase: 'https://your-api.onrender.com/api' };
-```
+   `VITE_API_BASE` = `https://your-api.onrender.com/api`
+
+   部署时会运行 `npm run vercel:build`，把该值写入 `public/js/runtime-config.js`。
 
 3. 确保 Render API 已开启 CORS（服务端已设置 `Access-Control-Allow-Origin: *`）。
 
