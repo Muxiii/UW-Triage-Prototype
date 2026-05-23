@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --env-file=.env server.mjs",
-    "start": "node --env-file=.env server.mjs",
+    "dev": "node server.mjs",
+    "dev:local": "node --env-file=.env server.mjs",
+    "start": "node server.mjs",
     "db:migrate": "node --env-file=.env scripts/migrate-db-to-supabase.mjs",
     "vercel:build": "node scripts/generate-runtime-config.mjs"
   },
