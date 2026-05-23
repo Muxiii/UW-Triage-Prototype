@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -490,8 +491,26 @@ function formatDocumentSegmentsForPrompt(segments) {
   return `${lines.join('\n')}\n`;
 }
 
+/** Debug dumps only; never fail the pipeline when data/ is read-only (Render/Vercel). */
+async function writeOptionalDebugFile(targetPath, payload) {
+  const body = `${JSON.stringify(payload, null, 2)}\n`;
+  try {
+    await writeFile(targetPath, body, 'utf8');
+    return;
+  } catch (err) {
+    if (err?.code !== 'EROFS' && err?.code !== 'EACCES') throw err;
+  }
+  const fallback = path.join(os.tmpdir(), path.basename(targetPath));
+  try {
+    await writeFile(fallback, body, 'utf8');
+    console.warn(`[debug] wrote ${path.basename(targetPath)} → ${fallback} (project data/ read-only)`);
+  } catch {
+    console.warn(`[debug] skipped ${path.basename(targetPath)} (read-only filesystem)`);
+  }
+}
+
 async function writeFile2flowSegmentCandidates(payload) {
-  await writeFile(FILE2FLOW_SEGMENT_CANDIDATES_PATH, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  await writeOptionalDebugFile(FILE2FLOW_SEGMENT_CANDIDATES_PATH, payload);
 }
 
 /** Optional pass-1: structure dossier for the graph LLM (candidate points, branch linkage). */
@@ -1472,7 +1491,7 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
             rawPrefix: String(graphRawAi || '').slice(0, 1200),
           };
           try {
-            await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
+            await writeOptionalDebugFile(FILE2FLOW_DEBUG_PATH, snap);
           } catch {
             /* ignore */
           }
@@ -1510,7 +1529,7 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
     if (snap) {
       snap.step_normalize_error = String(normErr?.message || normErr);
       try {
-        await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
+        await writeOptionalDebugFile(FILE2FLOW_DEBUG_PATH, snap);
       } catch {
         /* ignore */
       }
@@ -1532,7 +1551,7 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
       edges: normalized.edges,
       synthesizedNodeTypes: normalized.synthesized || [],
     };
-    await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
+    await writeOptionalDebugFile(FILE2FLOW_DEBUG_PATH, snap);
   }
   emit('graph', 'done', {
     nodes: normalized.nodes.length,
@@ -1580,7 +1599,7 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
           ? { nodes: normalized.nodes, edges: normalized.edges }
           : null,
       };
-      await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
+      await writeOptionalDebugFile(FILE2FLOW_DEBUG_PATH, snap);
     }
     emit('reorder', 'done', {
       changed: integrateResult.changed || restructureResult.changed,
@@ -1592,7 +1611,7 @@ async function generateGraph(input, debugFile2flow = false, onEvent = () => {}) 
   } else {
     if (snap) {
       snap.step5_restructure = { skipped: true, reason: 'AI_SKIP_DECISION_REORDER=1' };
-      await writeFile(FILE2FLOW_DEBUG_PATH, `${JSON.stringify(snap, null, 2)}\n`, 'utf8');
+      await writeOptionalDebugFile(FILE2FLOW_DEBUG_PATH, snap);
     }
     emit('reorder', 'skipped', { reason: 'AI_SKIP_DECISION_REORDER=1' });
   }

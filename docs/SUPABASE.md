@@ -52,7 +52,9 @@ npm run db:migrate
 
 - Build: `npm install`
 - Start: `npm start`
-- 环境变量：`SUPABASE_*`、`AI_*`、`PUBLIC_API_BASE`（若需要）
+- 环境变量（**必填**）：`SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`、`AI_PROVIDER`、`AI_API_KEY`
+- 启动日志应出现：`[store] using supabase backend`。若为 `file backend` 或报错 `EROFS ... db.json`，说明 Supabase 变量未生效。
+- `PUBLIC_API_BASE`（仅 Render 同时托管前端时可选）
 
 ### Vercel（仅静态前端）
 
